@@ -1,9 +1,10 @@
-<sdf version='1.5'>
+<sdf version='1.4'>
   <model name='iris_depth_camera'>
     <include>
       <uri>model://iris</uri>
     </include>
-   <model name="front_camera">
+
+<!--   <model name="front_camera">
     <pose>0.1 0 -0.03 0 0 0</pose>
     <link name="link">
       <inertial>
@@ -233,7 +234,7 @@
       </axis>
     </joint>
   
-  <!--<model name="distance_sensor">
+  <!-<model name="distance_sensor">
     <pose>-0.01 0 -0.02 0 1.57 0</pose>
     <link name="link">
       <inertial>

@@ -25,15 +25,15 @@
       </visual>
       <sensor name="distance_sensor" type="ray">
         <pose>0 0 0 0 0 0</pose>
-        <visualize>false</visualize>
+        <visualize>true</visualize>
         <update_rate>5</update_rate>
         <ray>
           <scan>
             <horizontal>
               <samples>720</samples>
               <resolution>1</resolution>
-              <min_angle>-3.14</min_angle>
-              <max_angle>3.14</max_angle>
+              <min_angle>-0.025</min_angle>
+              <max_angle>0.025</max_angle>
             </horizontal>
           </scan>
           <range>
@@ -43,12 +43,13 @@
           </range>
 
         </ray>
-        <plugin name="hokuyo_node" filename="libgazebo_ros_laser.so">
+        <plugin name="hokuyo_node" filename="libgazebo_ros_range.so">
           <robotNamespace></robotNamespace>
-          <topicName>/scan</topicName>
+          <topicName>distance_sensor</topicName>
           <frameName>laser_link</frameName>
         </plugin>
       </sensor>
     </link>
   </model>
 </sdf>
+
