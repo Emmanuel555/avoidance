@@ -472,8 +472,8 @@
           <zero_position_disarmed>0</zero_position_disarmed>
           <zero_position_armed>100</zero_position_armed>
           <joint_control_type>velocity</joint_control_type>
-        </channel>
-        <channel name='rotor5'>
+        </channel>   
+        <!--<channel name='rotor5'>
           <input_index>4</input_index>
           <input_offset>1</input_offset>
           <input_scaling>324.6</input_scaling>
@@ -534,7 +534,7 @@
           <zero_position_disarmed>0</zero_position_disarmed>
           <zero_position_armed>0</zero_position_armed>
           <joint_control_type>position</joint_control_type>
-        </channel>
+        </channel> -->
       </control_channels>
     </plugin>
     <static>0</static>

@@ -20,7 +20,7 @@
       </axis>
     </joint>-->
 
-    <include>
+<!--    <include>
       <uri>model://distance_sensor</uri>
       <pose>0 0 -0.1 0 1.571 0</pose>
     </include>
@@ -34,9 +34,9 @@
           <lower>0</lower>
         </limit>
       </axis>
-    </joint>
+    </joint> -->
 
-    <include>
+<!--    <include>
       <uri>model://realsense_camera</uri>
       <pose>0.1 0 0.08 0 0 -1.571</pose>
     </include>
@@ -50,9 +50,9 @@
           <lower>0</lower>
         </limit>
       </axis>
-    </joint>
+    </joint> -->
 
-    <include>
+<!--    <include>
       <uri>model://teraranger_evo_0</uri>
       <pose>0.05 -0.02 0.07 0 0 0</pose>
     </include>
@@ -66,7 +66,7 @@
           <lower>0</lower>
         </limit>
       </axis>
-    </joint>
+    </joint> -->
 
     <!--<include>
       <uri>model://teraranger_evo_45</uri>
@@ -100,7 +100,7 @@
       </axis>
     </joint>-->
 
-    <include>
+<!--    <include>
       <uri>model://teraranger_evo_270</uri>
       <pose>-0.01 0.01 0.07 0 0 1.571</pose>
     </include>
@@ -146,7 +146,7 @@
           <lower>0</lower>
         </limit>
       </axis>
-    </joint>  
+    </joint> -->
 
     <!-- <include>
       <uri>model://odometry_sensor</uri>
@@ -164,5 +164,6 @@
       </axis>
     </joint>
      -->
+
   </model>
 </sdf>

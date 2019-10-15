@@ -30,7 +30,7 @@
         </material>
       </visual>
       <sensor name="teraranger_evo_0" type="ray">
-        <pose>0 0 0 0 0 0</pose>
+        <pose>0 0.5 0 0 0 0</pose>
         <visualize>true</visualize>
         <update_rate>100</update_rate>
         <ray>
