@@ -3,33 +3,13 @@
 
 #include "../include/local_planner/planner_functions.h"
 
-#include "../include/local_planner/common.h"
+#include "avoidance/common.h"
 
 using namespace avoidance;
 
-void check_indexes(nav_msgs::GridCells &test,
-                   std::vector<Eigen::Vector2i> &truth, int resolution) {
-  for (int i = 0, j = 0; i < test.cells.size(), j < truth.size(); i++, j++) {
-    PolarPoint p_pol(test.cells[i].x, test.cells[i].y, 0.0f);
-    Eigen::Vector2i cell_idx = polarToHistogramIndex(p_pol, resolution);
-
-    EXPECT_EQ(truth[j], cell_idx);
-  }
-}
-
-void check_indexes(nav_msgs::GridCells &test, int truth_idx_e, int truth_idx_z,
-                   int resolution) {
-  for (int i = 0; i < test.cells.size(); i++) {
-    PolarPoint p_pol(test.cells[i].x, test.cells[i].y, 0.0f);
-    Eigen::Vector2i cell_idx = polarToHistogramIndex(p_pol, resolution);
-    EXPECT_EQ(truth_idx_e, cell_idx.y());
-    EXPECT_EQ(truth_idx_z, cell_idx.x());
-  }
-}
-
 TEST(PlannerFunctions, generateNewHistogramEmpty) {
   // GIVEN: an empty pointcloud
-  pcl::PointCloud<pcl::PointXYZ> empty_cloud;
+  pcl::PointCloud<pcl::PointXYZI> empty_cloud;
   Histogram histogram_output = Histogram(ALPHA_RES);
   geometry_msgs::PoseStamped location;
   location.pose.position.x = 0;
@@ -37,8 +17,7 @@ TEST(PlannerFunctions, generateNewHistogramEmpty) {
   location.pose.position.z = 0;
 
   // WHEN: we build a histogram
-  generateNewHistogram(histogram_output, empty_cloud,
-                       toEigen(location.pose.position));
+  generateNewHistogram(histogram_output, empty_cloud, toEigen(location.pose.position));
 
   // THEN: the histogram should be all zeros
   for (int e = 0; e < GRID_LENGTH_E; e++) {
@@ -54,27 +33,25 @@ TEST(PlannerFunctions, generateNewHistogramSpecificCells) {
   Eigen::Vector3f location(0.0f, 0.0f, 0.0f);
   float distance = 1.0f;
 
-  std::vector<float> e_angle_filled = {-89.9f, -30.0f, 0.0f,
-                                       20.0f,  40.0f,  89.9f};
-  std::vector<float> z_angle_filled = {-180.0f, -50.0f, 0.0f,
-                                       59.0f,   100.0f, 175.0f};
+  std::vector<float> e_angle_filled = {-89.9f, -30.0f, 0.0f, 20.0f, 40.0f, 89.9f};
+  std::vector<float> z_angle_filled = {-180.0f, -50.0f, 0.0f, 59.0f, 100.0f, 175.0f};
   std::vector<Eigen::Vector3f> middle_of_cell;
   std::vector<int> e_index, z_index;
 
   for (auto i : e_angle_filled) {
     for (auto j : z_angle_filled) {
       PolarPoint p_pol(i, j, distance);
-      middle_of_cell.push_back(polarToCartesian(p_pol, location));
+      middle_of_cell.push_back(polarHistogramToCartesian(p_pol, location));
       e_index.push_back(polarToHistogramIndex(p_pol, ALPHA_RES).y());
       z_index.push_back(polarToHistogramIndex(p_pol, ALPHA_RES).x());
     }
   }
 
-  pcl::PointCloud<pcl::PointXYZ> cloud;
+  pcl::PointCloud<pcl::PointXYZI> cloud;
   for (int i = 0; i < middle_of_cell.size(); i++) {
     // put 1000 point in every occupied cell
     for (int j = 0; j < 1000; j++) {
-      cloud.push_back(toXYZ(middle_of_cell[i]));
+      cloud.push_back(toXYZI(middle_of_cell[i], 0));
     }
   }
 
@@ -86,10 +63,8 @@ TEST(PlannerFunctions, generateNewHistogramSpecificCells) {
 
   for (int e = 0; e < GRID_LENGTH_E; e++) {
     for (int z = 0; z < GRID_LENGTH_Z; z++) {
-      bool e_found =
-          std::find(e_index.begin(), e_index.end(), e) != e_index.end();
-      bool z_found =
-          std::find(z_index.begin(), z_index.end(), z) != z_index.end();
+      bool e_found = std::find(e_index.begin(), e_index.end(), e) != e_index.end();
+      bool z_found = std::find(z_index.begin(), z_index.end(), z) != z_index.end();
       if (e_found && z_found) {
         EXPECT_NEAR(histogram_output.get_dist(e, z), 1.f, 0.01);
       } else {
@@ -99,130 +74,91 @@ TEST(PlannerFunctions, generateNewHistogramSpecificCells) {
   }
 }
 
-TEST(PlannerFunctions, calculateFOV) {
-  // GIVEN: the horizontal and vertical Field of View, the vehicle yaw and pitc
-  float h_fov = 90.0f;
-  float v_fov = 45.0f;
-  float yaw_z_greater_grid_length =
-      3.14f;  // z_FOV_max >= GRID_LENGTH_Z && z_FOV_min >= GRID_LENGTH_Z
-  float yaw_z_max_greater_grid =
-      -2.3f;  // z_FOV_max >= GRID_LENGTH_Z && z_FOV_min < GRID_LENGTH_Z
-  float yaw_z_min_smaller_zero = 3.9f;  // z_FOV_min < 0 && z_FOV_max >= 0
-  float yaw_z_smaller_zero = 5.6f;      // z_FOV_max < 0 && z_FOV_min < 0
-  float pitch = 0.0f;
-
-  // WHEN: we calculate the Field of View
-  std::vector<int> z_FOV_idx_z_greater_grid_length;
-  std::vector<int> z_FOV_idx_z_max_greater_grid;
-  std::vector<int> z_FOV_idx3_z_min_smaller_zero;
-  std::vector<int> z_FOV_idx_z_smaller_zero;
-  int e_FOV_min;
-  int e_FOV_max;
-
-  calculateFOV(h_fov, v_fov, z_FOV_idx_z_greater_grid_length, e_FOV_min,
-               e_FOV_max, yaw_z_greater_grid_length, pitch);
-  calculateFOV(h_fov, v_fov, z_FOV_idx_z_max_greater_grid, e_FOV_min, e_FOV_max,
-               yaw_z_max_greater_grid, pitch);
-  calculateFOV(h_fov, v_fov, z_FOV_idx3_z_min_smaller_zero, e_FOV_min,
-               e_FOV_max, yaw_z_min_smaller_zero, pitch);
-  calculateFOV(h_fov, v_fov, z_FOV_idx_z_smaller_zero, e_FOV_min, e_FOV_max,
-               yaw_z_smaller_zero, pitch);
-
-  // THEN: we expect polar histogram indexes that are in the Field of View
-  std::vector<int> output_z_greater_grid_length = {
-      7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21};
-  std::vector<int> output_z_max_greater_grid = {0, 1, 2,  3,  4,  5,  6, 7,
-                                                8, 9, 10, 11, 12, 58, 59};
-  std::vector<int> output_z_min_smaller_zero = {0, 1, 2,  3,  4,  5,  6, 7,
-                                                8, 9, 10, 11, 12, 13, 59};
-  std::vector<int> output_z_smaller_zero = {43, 44, 45, 46, 47, 48, 49, 50,
-                                            51, 52, 53, 54, 55, 56, 57, 58};
-
-  EXPECT_EQ(18, e_FOV_max);
-  EXPECT_EQ(10, e_FOV_min);
-  for (size_t i = 0; i < z_FOV_idx_z_greater_grid_length.size(); i++) {
-    EXPECT_EQ(output_z_greater_grid_length.at(i),
-              z_FOV_idx_z_greater_grid_length.at(i));
-  }
-
-  for (size_t i = 0; i < z_FOV_idx_z_max_greater_grid.size(); i++) {
-    EXPECT_EQ(output_z_max_greater_grid.at(i),
-              z_FOV_idx_z_max_greater_grid.at(i));
-  }
-
-  for (size_t i = 0; i < z_FOV_idx3_z_min_smaller_zero.size(); i++) {
-    EXPECT_EQ(output_z_min_smaller_zero.at(i),
-              z_FOV_idx3_z_min_smaller_zero.at(i));
-  }
-
-  for (size_t i = 0; i < z_FOV_idx_z_smaller_zero.size(); i++) {
-    EXPECT_EQ(output_z_smaller_zero.at(i), z_FOV_idx_z_smaller_zero.at(i));
-  }
-}
-
-TEST(PlannerFunctionsTests, filterPointCloud) {
+TEST(PlannerFunctionsTests, processPointcloud) {
   // GIVEN: two point clouds
   const Eigen::Vector3f position(1.5f, 1.0f, 4.5f);
-  Eigen::Vector3f closest(0.7f, 0.3f, -0.5f);
   pcl::PointCloud<pcl::PointXYZ> p1;
   p1.push_back(toXYZ(position + Eigen::Vector3f(1.1f, 0.8f, 0.1f)));
   p1.push_back(toXYZ(position + Eigen::Vector3f(2.2f, 1.0f, 1.0f)));
   p1.push_back(toXYZ(position + Eigen::Vector3f(1.0f, -3.0f, 1.0f)));
-  p1.push_back(toXYZ(
-      position + Eigen::Vector3f(0.7f, 0.3f, -0.5f)));  // < min_dist_backoff
+  p1.push_back(toXYZ(position + Eigen::Vector3f(0.7f, 0.3f, -0.5f)));
   p1.push_back(toXYZ(position + Eigen::Vector3f(-1.0f, 1.0f, 1.0f)));
   p1.push_back(toXYZ(position + Eigen::Vector3f(-1.0f, -1.1f, 3.5f)));
 
   pcl::PointCloud<pcl::PointXYZ> p2;
-  p2.push_back(toXYZ(
-      position + Eigen::Vector3f(1.0f, 5.0f, 1.0f)));  // > histogram_box.radius
-  p2.push_back(
-      toXYZ(position +
-            Eigen::Vector3f(100.0f, 5.0f, 1.0f)));  // > histogram_box.radius
-  p2.push_back(toXYZ(
-      position + Eigen::Vector3f(0.1f, 0.05f, 0.05f)));  // < min_realsense_dist
+  p2.push_back(toXYZ(position + Eigen::Vector3f(1.0f, 5.0f, 1.0f)));
+  p2.push_back(toXYZ(position + Eigen::Vector3f(100.0f, 5.0f, 1.0f)));  // > max_sensor_dist
+  p2.push_back(toXYZ(position + Eigen::Vector3f(0.1f, 0.05f, 0.05f)));  // < min_sensor_dist
 
   std::vector<pcl::PointCloud<pcl::PointXYZ>> complete_cloud;
   complete_cloud.push_back(p1);
   complete_cloud.push_back(p2);
-  float min_dist_backoff = 1.0f;
-  Box histogram_box(5.0f);
-  histogram_box.setBoxLimits(position, 4.5f);
-  float min_realsense_dist = 0.2f;
+  float min_sensor_dist = 0.2f;
+  float max_sensor_dist = 12.f;
 
-  pcl::PointCloud<pcl::PointXYZ> cropped_cloud, cropped_cloud2;
-  Eigen::Vector3f closest_point, closest_point2;
-  float distance_to_closest_point, distance_to_closest_point2;
-  int counter_backoff, counter_backoff2;
+  pcl::PointCloud<pcl::PointXYZI> processed_cloud1, processed_cloud2, processed_cloud3;
+  Eigen::Vector3f memory_point(1.4f, 0.0f, 0.0f);
+  PolarPoint memory_point_polar = cartesianToPolarFCU(position + memory_point, position);
+  processed_cloud1.push_back(toXYZI(position + memory_point, 5.0f));
+  processed_cloud2.push_back(toXYZI(position + memory_point, 5.0f));
+  processed_cloud3.push_back(toXYZI(position + memory_point, 5.0f));
 
-  // WHEN: we filter the PointCloud with different values of min_cloud_size
-  filterPointCloud(cropped_cloud, closest_point, distance_to_closest_point,
-                   counter_backoff, complete_cloud, 5.0, min_dist_backoff,
-                   histogram_box, position, min_realsense_dist);
+  std::vector<FOV> FOV_zero;  // zero FOV means all pts are outside FOV, and thus remembered
+  FOV_zero.push_back(FOV(1.0f, 1.0f, 0.0f, 0.0f));
 
-  filterPointCloud(cropped_cloud2, closest_point2, distance_to_closest_point2,
-                   counter_backoff2, complete_cloud, 20.0, min_dist_backoff,
-                   histogram_box, position, min_realsense_dist);
+  std::vector<FOV> FOV_regular;
+  FOV_regular.push_back(FOV(0.0f, 1.0f, 85.f, 65.f));
 
-  // THEN: we expect cropped_cloud to have 6 points and a backoff point, while
-  // cropped_cloud2 to be empty
-  EXPECT_FLOAT_EQ((position + closest).x(), closest_point.x());
-  EXPECT_FLOAT_EQ((position + closest).y(), closest_point.y());
-  EXPECT_FLOAT_EQ((position + closest).z(), closest_point.z());
-  EXPECT_FLOAT_EQ(closest.norm(), distance_to_closest_point);
-  EXPECT_EQ(1, counter_backoff);
-  for (int i = 0; i < p1.points.size(); i++) {
-    bool same_point = (p1.points[i].x == cropped_cloud.points[i].x) &&
-                      (p1.points[i].y == cropped_cloud.points[i].y) &&
-                      (p1.points[i].z == cropped_cloud.points[i].z);
-    ASSERT_TRUE(same_point);
-  }
+  // WHEN: we filter the PointCloud with different values max_age
+  processPointcloud(processed_cloud1, complete_cloud, FOV_zero, 0.0f, 0.0f, position, min_sensor_dist, max_sensor_dist,
+                    0.0f, 0.5f, 1);
 
-  EXPECT_EQ(0, cropped_cloud2.points.size());
+  // todo: test different yaw and pitch
+  processPointcloud(processed_cloud2, complete_cloud, FOV_zero, 0.0f, 0.0f, position, min_sensor_dist, max_sensor_dist,
+                    10.0f, .5f, 1);
+
+  processPointcloud(processed_cloud3, complete_cloud, FOV_regular, 0.0f, 0.0f, position, min_sensor_dist,
+                    max_sensor_dist, 10.0f, 0.5f, 1);
+
+  // THEN: we expect the first cloud to have 5 points
+  // the second cloud should contain all 6 points
+  EXPECT_EQ(7, processed_cloud1.size());
+  EXPECT_EQ(8, processed_cloud2.size());
+  EXPECT_TRUE(pointInsideFOV(FOV_regular, memory_point_polar));
+  EXPECT_EQ(7, processed_cloud3.size());  // since memory point is inside FOV, it isn't remembered
 }
 
-TEST(PlannerFunctions, testDirectionTree) {
-  // GIVEN: the node positions in a tree and some possible vehicle positions
+TEST(PlannerFunctions, compressHistogramElevation) {
+  // GIVEN: a position and a pointcloud with data
+  const Eigen::Vector3f position(0.f, 0.f, 5.f);
+  const Eigen::Vector3f data_point(14.f, 0.f, 5.f);
+  pcl::PointCloud<pcl::PointXYZI> cloud;
+
+  for (int j = 0; j < 1000; j++) {
+    cloud.push_back(toXYZI(data_point, 0));
+  }
+
+  Histogram histogram = Histogram(ALPHA_RES);
+  Histogram compressed_histogram = Histogram(ALPHA_RES);
+
+  // WHEN: we build a histogram
+  generateNewHistogram(histogram, cloud, position);
+  compressHistogramElevation(compressed_histogram, histogram, position);
+
+  PolarPoint data_pol = cartesianToPolarHistogram(data_point, position);
+  Eigen::Vector2i indices = polarToHistogramIndex(data_pol, ALPHA_RES);
+
+  for (int z = 0; z < GRID_LENGTH_Z; z++) {
+    if (z == indices.x()) {
+      EXPECT_FLOAT_EQ(compressed_histogram.get_dist(0, z), 14.f);
+    } else {
+      EXPECT_FLOAT_EQ(compressed_histogram.get_dist(0, z), 0.f);
+    }
+  }
+}
+
+TEST(PlannerFunctions, getSetpointFromPath) {
+  // GIVEN: the node positions in a path and some possible vehicle positions
   float n1_x = 0.8f;
   float n2_x = 1.5f;
   float n3_x = 2.1f;
@@ -233,30 +169,50 @@ TEST(PlannerFunctions, testDirectionTree) {
   Eigen::Vector3f n3(n3_x, n2.y() + sqrtf(1 - powf(n3_x - n2.x(), 2)), 2.5f);
   Eigen::Vector3f n4(n4_x, n3.y() + sqrtf(1 - powf(n4_x - n3.x(), 2)), 2.5f);
   const std::vector<Eigen::Vector3f> path_node_positions = {n4, n3, n2, n1, n0};
+  const std::vector<Eigen::Vector3f> empty_path = {};
+  ros::Time t1 = ros::Time::now();
+  ros::Time t2 = t1 - ros::Duration(0.1);
+  ros::Time t3 = t1 - ros::Duration(1.1);
 
-  PolarPoint p, p1, p2;
-  Eigen::Vector3f postion(0.2f, 0.3f, 1.5f);
-  Eigen::Vector3f postion1(1.1f, 2.3f, 2.5f);
-  Eigen::Vector3f postion2(5.4f, 2.0f, 2.5f);
-  Eigen::Vector3f goal(10.0f, 5.0f, 2.5f);
+  float velocity = 1.0f;  // assume we're flying at 1m/s
+
+  Eigen::Vector3f sp1, sp2, sp3;
 
   // WHEN: we look for the best direction to fly towards
-  bool res = getDirectionFromTree(p, path_node_positions, postion, goal);
-  bool res1 = getDirectionFromTree(p1, path_node_positions, postion1, goal);
-  bool res2 = getDirectionFromTree(p2, path_node_positions, postion2, goal);
+  bool res = getSetpointFromPath(path_node_positions, t1, velocity, ros::Time::now(),
+                                 sp1);  // very short time should still return node 1
+  bool res1 = getSetpointFromPath(path_node_positions, t2, velocity, ros::Time::now(), sp2);
+  bool res2 =
+      getSetpointFromPath(path_node_positions, t3, velocity, ros::Time::now(), sp3);  // should be second node on path
+  bool res3 = getSetpointFromPath(empty_path, t1, velocity, ros::Time::now(), sp1);
 
-  // THEN: we expect a direction in between node n1 and n2 for position, between
-  // node n3 and n4 for position1, and not to get an available tree for the
-  // position2
+  // THEN: we expect the setpoint in between node n1 and n2 for t1 and t2 between
+  // node n2 and n3 for t3, and not to get an available path for the empty path
   ASSERT_TRUE(res);
-  EXPECT_NEAR(45.0f, p.e, 1.f);
-  EXPECT_NEAR(57.0f, p.z, 1.f);
+  EXPECT_GE(sp1.x(), n1.x());
+  EXPECT_LE(sp1.x(), n2.x());
+  EXPECT_GE(sp1.y(), n1.y());
+  EXPECT_LE(sp1.y(), n2.y());
+  EXPECT_GE(sp1.z(), n1.z());
+  EXPECT_LE(sp1.z(), n2.z());
 
   ASSERT_TRUE(res1);
-  EXPECT_NEAR(0.0f, p1.e, 1.f);
-  EXPECT_NEAR(72.0f, p1.z, 1.f);
+  EXPECT_GE(sp2.x(), n1.x());
+  EXPECT_LE(sp2.x(), n2.x());
+  EXPECT_GE(sp2.y(), n1.y());
+  EXPECT_LE(sp2.y(), n2.y());
+  EXPECT_GE(sp2.z(), n1.z());
+  EXPECT_LE(sp2.z(), n2.z());
 
-  ASSERT_FALSE(res2);
+  ASSERT_TRUE(res2);
+  EXPECT_GE(sp3.x(), n2.x());
+  EXPECT_LE(sp3.x(), n3.x());
+  EXPECT_GE(sp3.y(), n2.y());
+  EXPECT_LE(sp3.y(), n3.y());
+  EXPECT_GE(sp3.z(), n2.z());
+  EXPECT_LE(sp3.z(), n3.z());
+
+  ASSERT_FALSE(res3);
 }
 
 TEST(PlannerFunctions, padPolarMatrixAzimuthWrapping) {
@@ -283,19 +239,13 @@ TEST(PlannerFunctions, padPolarMatrixAzimuthWrapping) {
   ASSERT_EQ(GRID_LENGTH_Z + 2 * n_lines_padding, matrix_padded.cols());
 
   bool middle_part_correct =
-      matrix_padded.block(n_lines_padding, n_lines_padding, matrix.rows(),
-                          matrix.cols()) == matrix;
+      matrix_padded.block(n_lines_padding, n_lines_padding, matrix.rows(), matrix.cols()) == matrix;
   bool col_0_correct = matrix_padded.col(0) == matrix_padded.col(GRID_LENGTH_Z);
-  bool col_1_correct =
-      matrix_padded.col(1) == matrix_padded.col(GRID_LENGTH_Z + 1);
-  bool col_2_correct =
-      matrix_padded.col(2) == matrix_padded.col(GRID_LENGTH_Z + 2);
-  bool col_63_correct =
-      matrix_padded.col(GRID_LENGTH_Z + 3) == matrix_padded.col(3);
-  bool col_64_correct =
-      matrix_padded.col(GRID_LENGTH_Z + 4) == matrix_padded.col(4);
-  bool col_65_correct =
-      matrix_padded.col(GRID_LENGTH_Z + 5) == matrix_padded.col(5);
+  bool col_1_correct = matrix_padded.col(1) == matrix_padded.col(GRID_LENGTH_Z + 1);
+  bool col_2_correct = matrix_padded.col(2) == matrix_padded.col(GRID_LENGTH_Z + 2);
+  bool col_63_correct = matrix_padded.col(GRID_LENGTH_Z + 3) == matrix_padded.col(3);
+  bool col_64_correct = matrix_padded.col(GRID_LENGTH_Z + 4) == matrix_padded.col(4);
+  bool col_65_correct = matrix_padded.col(GRID_LENGTH_Z + 5) == matrix_padded.col(5);
 
   EXPECT_TRUE(middle_part_correct);
   EXPECT_TRUE(col_0_correct);
@@ -340,20 +290,16 @@ TEST(PlannerFunctions, padPolarMatrixElevationWrapping) {
   ASSERT_EQ(GRID_LENGTH_Z + 2 * n_lines_padding, matrix_padded.cols());
 
   bool middle_part_correct =
-      matrix_padded.block(n_lines_padding, n_lines_padding, matrix.rows(),
-                          matrix.cols()) == matrix;
+      matrix_padded.block(n_lines_padding, n_lines_padding, matrix.rows(), matrix.cols()) == matrix;
   bool val_1 = matrix_padded(1, half_z + n_lines_padding) == 1;
   bool val_2 = matrix_padded(1, half_z + n_lines_padding + 1) == 2;
   bool val_3 = matrix_padded(0, half_z + n_lines_padding) == 3;
   bool val_4 = matrix_padded(1, 2) == 4;
   bool val_5 = matrix_padded(0, 3) == 5;
   bool val_6 = matrix_padded(1, half_z - 1 + n_lines_padding) == 6;
-  bool val_7 = matrix_padded(last_e + 1 + n_lines_padding,
-                             half_z + n_lines_padding) == 7;
-  bool val_8 = matrix_padded(last_e + 2 + n_lines_padding,
-                             GRID_LENGTH_Z + n_lines_padding - 1) == 8;
-  bool val_9 = matrix_padded(last_e + 1 + n_lines_padding,
-                             half_z - 1 + n_lines_padding) == 9;
+  bool val_7 = matrix_padded(last_e + 1 + n_lines_padding, half_z + n_lines_padding) == 7;
+  bool val_8 = matrix_padded(last_e + 2 + n_lines_padding, GRID_LENGTH_Z + n_lines_padding - 1) == 8;
+  bool val_9 = matrix_padded(last_e + 1 + n_lines_padding, half_z - 1 + n_lines_padding) == 9;
 
   EXPECT_TRUE(middle_part_correct);
   EXPECT_TRUE(val_1);
@@ -426,30 +372,65 @@ TEST(PlannerFunctions, smoothPolarMatrix) {
   EXPECT_TRUE(greater_equal);
 }
 
+TEST(PlannerFunctions, smoothMatrix) {
+  // GIVEN: a matrix with a single cell set
+  unsigned int smooth_radius = 4;
+  Eigen::MatrixXf matrix;
+  matrix.resize(10, 20);
+  matrix.fill(0);
+  matrix(3, 16) = 100;
+  matrix(6, 6) = -100;
+
+  // WHEN: we smooth it
+  Eigen::MatrixXf matrix_old = matrix;
+  smoothPolarMatrix(matrix, smooth_radius);
+
+  // THEN: it should match the matrix we expect
+  Eigen::MatrixXf expected_matrix(matrix.rows(), matrix.cols());
+  // clang-format off
+  expected_matrix <<
+   8, 0,   4,   8,  12,  16,  20,  16,  12,   8,   4, 0,  8, 16,  24,  32,  40,  32,  24, 16,
+  12, 0,   0,   0,   0,   0,   0,   0,   0,   0,   0, 0, 12, 24,  36,  48,  60,  48,  36, 24,
+  16, 0,  -4,  -8, -12, -16, -20, -16, -12,  -8,  -4, 0, 16, 32,  48,  64,  80,  64,  48, 32,
+  20, 0,  -8, -16, -24, -32, -40, -32, -24, -16,  -8, 0, 20, 40,  60,  80, 100,  80,  60, 40,
+  16, 0, -12, -24, -36, -48, -60, -48, -36, -24, -12, 0, 16, 32,  48,  64,  80,  64,  48, 32,
+  12, 0, -16, -32, -48, -64, -80, -64, -48, -32, -16, 0, 12, 24,  36,  48,  60,  48,  36, 24,
+   8, 0, -20, -40, -60, -80,-100, -80, -60, -40, -20, 0,  8, 16,  24,  32,  40,  32,  24, 16,
+   4, 0, -16, -32, -48, -64, -80, -64, -48, -32, -16, 0,  4,  8,  12,  16,  20,  16,  12,  8,
+   0, 0, -12, -24, -36, -48, -60, -48, -36, -24, -12, 0,  0,  0,   0,   0,   0,   0,   0,  0,
+  -4, 0,  -8, -16, -24, -32, -40, -32, -24, -16,  -8, 0, -4, -8, -12, -16, -20, -16, -12, -8;
+  // clang-format on
+
+  EXPECT_LT((expected_matrix - matrix).cwiseAbs().maxCoeff(), 1e-5);
+}
+
 TEST(PlannerFunctions, getCostMatrixNoObstacles) {
   // GIVEN: a position, goal and an empty histogram
   Eigen::Vector3f position(0.f, 0.f, 0.f);
+  Eigen::Vector3f velocity(1.f, 0.f, 0.f);  // despite some initial velocity orthogonal to the goal!
   Eigen::Vector3f goal(0.f, 5.f, 0.f);
-  Eigen::Vector3f last_sent_waypoint(0.f, 1.f, 0.f);
-  float heading = 0.f;
   costParameters cost_params;
-  cost_params.goal_cost_param = 2.f;
-  cost_params.smooth_cost_param = 1.5f;
-  cost_params.height_change_cost_param = 4.f;
-  cost_params.height_change_cost_param_adapted = 4.f;
+  cost_params.yaw_cost_param = 2.5f;
+  cost_params.pitch_cost_param = 10.0f;
+  cost_params.velocity_cost_param = 1200.f;
+  cost_params.obstacle_cost_param = 5.0f;
   Eigen::MatrixXf cost_matrix;
   Histogram histogram = Histogram(ALPHA_RES);
+  float smoothing_radius = 30.f;
+  const float max_sensor_range = 15.f;
+  const float min_sensor_range = 0.2f;
 
   // WHEN: we calculate the cost matrix from the input data
-  getCostMatrix(histogram, goal, position, heading, last_sent_waypoint,
-                cost_params, false, cost_matrix);
+  std::vector<uint8_t> cost_image_data;
+  getCostMatrix(histogram, goal, position, velocity, cost_params, smoothing_radius, goal, max_sensor_range,
+                min_sensor_range, cost_matrix, cost_image_data);
 
   // THEN: The minimum cost should be in the direction of the goal
-  PolarPoint best_pol = cartesianToPolar(goal, position);
+  PolarPoint best_pol = cartesianToPolarHistogram(goal, position);
   Eigen::Vector2i best_index = polarToHistogramIndex(best_pol, ALPHA_RES);
 
   Eigen::MatrixXf::Index minRow, minCol;
-  float min = cost_matrix.minCoeff(&minRow, &minCol);
+  cost_matrix.minCoeff(&minRow, &minCol);
 
   EXPECT_NEAR((int)minRow, best_index.y(), 1);
   EXPECT_NEAR((int)minCol, best_index.x(), 1);
@@ -465,36 +446,31 @@ TEST(PlannerFunctions, getCostMatrixNoObstacles) {
 
   // check that rows farther away have bigger cost. Leave out direct neighbor
   // rows as the center might be split over cells
-  bool row1 = (matrix_padded.row(best_index_padded_e + 2).array() >
-               matrix_padded.row(best_index_padded_e + 1).array())
-                  .all();
-  bool row2 = (matrix_padded.row(best_index_padded_e + 3).array() >
-               matrix_padded.row(best_index_padded_e + 2).array())
-                  .all();
-  bool row3 = (matrix_padded.row(best_index_padded_e - 2).array() >
-               matrix_padded.row(best_index_padded_e).array() - 1)
-                  .all();
-  bool row4 = (matrix_padded.row(best_index_padded_e - 3).array() >
-               matrix_padded.row(best_index_padded_e).array() - 2)
-                  .all();
+  bool row1 =
+      (matrix_padded.row(best_index_padded_e + 2).array() > matrix_padded.row(best_index_padded_e + 1).array()).all();
+  bool row2 =
+      (matrix_padded.row(best_index_padded_e + 3).array() > matrix_padded.row(best_index_padded_e + 2).array()).all();
+  bool row3 =
+      (matrix_padded.row(best_index_padded_e - 2).array() > matrix_padded.row(best_index_padded_e).array() - 1).all();
+  bool row4 =
+      (matrix_padded.row(best_index_padded_e - 3).array() > matrix_padded.row(best_index_padded_e).array() - 2).all();
 
   // check that columns farther away have bigger cost. Leave out direct neighbor
   // rows as the center might be split over cells
-  Eigen::MatrixXf matrix_padded2 =
-      matrix_padded.block(3, 3, cost_matrix.rows(),
-                          cost_matrix.cols());  // cut off padded top part
-  bool col1 = (matrix_padded2.col(best_index_padded_z + 10).array() >
-               matrix_padded2.col(best_index_padded_z + 1).array())
-                  .all();
-  bool col2 = (matrix_padded2.col(best_index_padded_z + 20).array() >
-               matrix_padded2.col(best_index_padded_z + 10).array())
-                  .all();
-  bool col3 = (matrix_padded2.col(best_index_padded_z - 10).array() >
-               matrix_padded2.col(best_index_padded_z).array() - 1)
-                  .all();
-  bool col4 = (matrix_padded2.col(best_index_padded_z - 20).array() >
-               matrix_padded2.col(best_index_padded_z).array() - 10)
-                  .all();
+  Eigen::MatrixXf matrix_padded2 = matrix_padded.block(3, 3, cost_matrix.rows(),
+                                                       cost_matrix.cols());  // cut off padded top part
+  bool col1 =
+      (matrix_padded2.col(best_index_padded_z + 10).array() > matrix_padded2.col(best_index_padded_z + 1).array())
+          .all();
+  bool col2 =
+      (matrix_padded2.col(best_index_padded_z + 20).array() > matrix_padded2.col(best_index_padded_z + 10).array())
+          .all();
+  bool col3 =
+      (matrix_padded2.col(best_index_padded_z - 10).array() > matrix_padded2.col(best_index_padded_z).array() - 1)
+          .all();
+  bool col4 =
+      (matrix_padded2.col(best_index_padded_z - 20).array() > matrix_padded2.col(best_index_padded_z).array() - 10)
+          .all();
 
   EXPECT_TRUE(col1);
   EXPECT_TRUE(col2);
@@ -509,135 +485,85 @@ TEST(PlannerFunctions, getCostMatrixNoObstacles) {
 TEST(PlannerFunctions, CostfunctionGoalCost) {
   // GIVEN: a scenario with two different goal locations
   Eigen::Vector3f position(0.f, 0.f, 0.f);
+  Eigen::Vector3f velocity(0.f, 0.f, 0.f);
   Eigen::Vector3f goal_1(0.f, 5.f, 0.f);
   Eigen::Vector3f goal_2(3.f, 3.f, 0.f);
-  Eigen::Vector3f last_sent_waypoint(0.f, 1.f, 0.f);
-  float heading = 0.f;
-  costParameters cost_params;
-  cost_params.goal_cost_param = 3.f;
-  cost_params.heading_cost_param = 0.5f;
-  cost_params.smooth_cost_param = 1.5f;
-  cost_params.height_change_cost_param = 4.f;
-  cost_params.height_change_cost_param_adapted = 4.f;
-  float obstacle_distance = 0.f;
-  float distance_cost_1, other_costs_1, distance_cost_2, other_costs_2;
 
-  Eigen::Vector2f candidate_1(0.f, 0.f);
+  costParameters cost_params;
+  cost_params.yaw_cost_param = 2.5f;
+  cost_params.pitch_cost_param = 10.0f;
+  cost_params.velocity_cost_param = 1200.f;
+  cost_params.obstacle_cost_param = 5.0f;
+  float obstacle_distance = 0.f;
+  std::pair<float, float> cost_1, cost_2;
+
+  PolarPoint candidate_1(0.f, 0.f, 1.0f);
 
   // WHEN: we calculate the cost of one cell for the same scenario but with two
   // different goals
-  costFunction(candidate_1.y(), candidate_1.x(), obstacle_distance, goal_1,
-               position, heading, last_sent_waypoint, cost_params,
-               distance_cost_1, other_costs_1);
-  costFunction(candidate_1.y(), candidate_1.x(), obstacle_distance, goal_2,
-               position, heading, last_sent_waypoint, cost_params,
-               distance_cost_2, other_costs_2);
+  cost_1 = costFunction(candidate_1, obstacle_distance, goal_1, position, velocity, cost_params, goal_1, true);
+  cost_2 = costFunction(candidate_1, obstacle_distance, goal_2, position, velocity, cost_params, goal_2, true);
 
   // THEN: The cost in the case where the goal is in the cell direction should
   // be lower
-  EXPECT_LT(other_costs_1, other_costs_2);
+  EXPECT_LT(cost_1.second, cost_2.second);
 }
 
 TEST(PlannerFunctions, CostfunctionDistanceCost) {
   // GIVEN: a scenario with two different obstacle distances
   Eigen::Vector3f position(0.f, 0.f, 0.f);
+  Eigen::Vector3f velocity(0.f, 0.f, 0.f);
   Eigen::Vector3f goal(0.f, 5.f, 0.f);
-  Eigen::Vector3f last_sent_waypoint(0.f, 1.f, 0.f);
-  float heading = 0.f;
+
   costParameters cost_params;
-  cost_params.goal_cost_param = 3.f;
-  cost_params.heading_cost_param = 0.5f;
-  cost_params.smooth_cost_param = 1.5f;
-  cost_params.height_change_cost_param = 4.f;
-  cost_params.height_change_cost_param_adapted = 4.f;
+  cost_params.yaw_cost_param = 2.5f;
+  cost_params.pitch_cost_param = 10.0f;
+  cost_params.velocity_cost_param = 1200.f;
+  cost_params.obstacle_cost_param = 5.0f;
   float distance_1 = 0.f;
   float distance_2 = 3.f;
   float distance_3 = 5.f;
-  float distance_cost_1, distance_cost_2, distance_cost_3, other_costs;
-
-  Eigen::Vector2f candidate_1(0.f, 0.f);
+  std::pair<float, float> cost_1, cost_2, cost_3;
+  PolarPoint candidate_1(0.f, 0.f, 1.0f);
 
   // WHEN: we calculate the cost of one cell for the same scenario but with two
   // different obstacle distance
-  costFunction(candidate_1.y(), candidate_1.x(), distance_1, goal, position,
-               heading, last_sent_waypoint, cost_params, distance_cost_1,
-               other_costs);
-  costFunction(candidate_1.y(), candidate_1.x(), distance_2, goal, position,
-               heading, last_sent_waypoint, cost_params, distance_cost_2,
-               other_costs);
-  costFunction(candidate_1.y(), candidate_1.x(), distance_3, goal, position,
-               heading, last_sent_waypoint, cost_params, distance_cost_3,
-               other_costs);
+  cost_1 = costFunction(candidate_1, distance_1, goal, position, velocity, cost_params, goal, true);
+  cost_2 = costFunction(candidate_1, distance_2, goal, position, velocity, cost_params, goal, true);
+  cost_3 = costFunction(candidate_1, distance_3, goal, position, velocity, cost_params, goal, true);
 
   // THEN: The distance cost for no obstacle should be zero and the distance
   // cost for the closer obstacle should be bigger
-  EXPECT_LT(distance_cost_1, distance_cost_2);
-  EXPECT_LT(distance_cost_3, distance_cost_2);
-  EXPECT_FLOAT_EQ(distance_cost_1, 0.f);
+  EXPECT_LT(cost_1.first, cost_2.first);
+  EXPECT_LT(cost_3.first, cost_2.first);
+  EXPECT_FLOAT_EQ(cost_1.first, 0.f);
 }
 
-TEST(PlannerFunctions, CostfunctionHeadingCost) {
+TEST(PlannerFunctions, CostfunctionVelocityCost) {
   // GIVEN: a scenario with two different initial headings
   Eigen::Vector3f position(0.f, 0.f, 0.f);
+  Eigen::Vector3f velocity_1(0.f, 1.f, 0.f);
+  Eigen::Vector3f velocity_2(1.f, 0.f, 0.f);
   Eigen::Vector3f goal(0.f, 5.f, 0.f);
-  Eigen::Vector3f last_sent_waypoint(0.f, 1.f, 0.f);
-  float heading_1 = 10.f;
-  float heading_2 = 30.f;
-  costParameters cost_params;
-  cost_params.goal_cost_param = 3.f;
-  cost_params.heading_cost_param = 0.5f;
-  cost_params.smooth_cost_param = 1.5f;
-  cost_params.height_change_cost_param = 4.f;
-  cost_params.height_change_cost_param_adapted = 4.f;
-  float obstacle_distance = 0.f;
-  float distance_cost, other_costs_1, other_costs_2;
 
-  Eigen::Vector2f candidate_1(0.f, 0.f);
+  costParameters cost_params;
+  cost_params.yaw_cost_param = 2.5f;
+  cost_params.pitch_cost_param = 10.0f;
+  cost_params.velocity_cost_param = 1200.f;
+  cost_params.obstacle_cost_param = 5.0f;
+  float obstacle_distance = 0.f;
+  std::pair<float, float> cost_1, cost_2;
+
+  PolarPoint candidate_1(0.f, 0.f, 1.0f);
 
   // WHEN: we calculate the cost of one cell for the same scenario but with two
-  // different initial headings
-  costFunction(candidate_1.y(), candidate_1.x(), obstacle_distance, goal,
-               position, heading_1, last_sent_waypoint, cost_params,
-               distance_cost, other_costs_1);
-  costFunction(candidate_1.y(), candidate_1.x(), obstacle_distance, goal,
-               position, heading_2, last_sent_waypoint, cost_params,
-               distance_cost, other_costs_2);
+  // different initial velocities
+  cost_1 = costFunction(candidate_1, obstacle_distance, goal, position, velocity_1, cost_params, goal, true);
+  cost_2 = costFunction(candidate_1, obstacle_distance, goal, position, velocity_2, cost_params, goal, true);
 
   // THEN: The cost in the case where the initial heading is closer to the
   // candidate should be lower
-  EXPECT_LT(other_costs_1, other_costs_2);
-}
-
-TEST(PlannerFunctions, CostfunctionSmoothingCost) {
-  // GIVEN: a scenario with two different initial headings
-  Eigen::Vector3f position(0.f, 0.f, 0.f);
-  Eigen::Vector3f goal(0.f, 5.f, 0.f);
-  Eigen::Vector3f last_sent_waypoint_1(1.f, 2.f, 0.f);
-  Eigen::Vector3f last_sent_waypoint_2(1.5f, 1.5f, 0.f);
-  float heading = 0.f;
-  costParameters cost_params;
-  cost_params.goal_cost_param = 3.f;
-  cost_params.heading_cost_param = 0.5f;
-  cost_params.smooth_cost_param = 1.5f;
-  cost_params.height_change_cost_param = 4.f;
-  cost_params.height_change_cost_param_adapted = 4.f;
-  float obstacle_distance = 0.f;
-  float distance_cost, other_costs_1, other_costs_2;
-
-  Eigen::Vector2f candidate_1(0.f, 0.f);
-
-  // WHEN: we calculate the cost of one cell for the same scenario but with two
-  // different last waypoints
-  costFunction(candidate_1.y(), candidate_1.x(), obstacle_distance, goal,
-               position, heading, last_sent_waypoint_1, cost_params,
-               distance_cost, other_costs_1);
-  costFunction(candidate_1.y(), candidate_1.x(), obstacle_distance, goal,
-               position, heading, last_sent_waypoint_2, cost_params,
-               distance_cost, other_costs_2);
-
-  // THEN: The cost in the case where the last waypoint is closer to the
-  // candidate should be lower
-  EXPECT_LT(other_costs_1, other_costs_2);
+  EXPECT_LT(cost_1.second, cost_2.second);
 }
 
 TEST(Histogram, HistogramDownsampleCorrectUsage) {
@@ -647,10 +573,6 @@ TEST(Histogram, HistogramDownsampleCorrectUsage) {
   histogram.set_dist(1, 0, 1.3);
   histogram.set_dist(0, 1, 1.3);
   histogram.set_dist(1, 1, 1.3);
-  histogram.set_age(2, 2, 3);
-  histogram.set_age(3, 2, 3);
-  histogram.set_age(2, 3, 3);
-  histogram.set_age(3, 3, 3);
 
   // WHEN: we downsample the histogram to have a larger bin size
   histogram.downsample();
@@ -661,13 +583,10 @@ TEST(Histogram, HistogramDownsampleCorrectUsage) {
     for (int j = 0; j < GRID_LENGTH_Z / 2; ++j) {
       if (i == 0 && j == 0) {
         EXPECT_FLOAT_EQ(1.3, histogram.get_dist(i, j));
-        EXPECT_FLOAT_EQ(0.0, histogram.get_age(i, j));
       } else if (i == 1 && j == 1) {
-        EXPECT_FLOAT_EQ(3, histogram.get_age(i, j));
         EXPECT_FLOAT_EQ(0.0, histogram.get_dist(i, j));
       } else {
         EXPECT_FLOAT_EQ(0.0, histogram.get_dist(i, j));
-        EXPECT_FLOAT_EQ(0.0, histogram.get_age(i, j));
       }
     }
   }
@@ -677,7 +596,6 @@ TEST(Histogram, HistogramUpsampleCorrectUsage) {
   // GIVEN: a histogram of the correct resolution
   Histogram histogram = Histogram(ALPHA_RES * 2);
   histogram.set_dist(0, 0, 1.3);
-  histogram.set_age(1, 1, 3);
 
   // WHEN: we upsample the histogram to have regular bin size
   histogram.upsample();
@@ -686,17 +604,12 @@ TEST(Histogram, HistogramUpsampleCorrectUsage) {
   // resolution histogram into four cells
   for (int i = 0; i < GRID_LENGTH_E; ++i) {
     for (int j = 0; j < GRID_LENGTH_Z; ++j) {
-      if ((i == 0 && j == 0) || (i == 1 && j == 0) || (i == 0 && j == 1) ||
-          (i == 1 && j == 1)) {
+      if ((i == 0 && j == 0) || (i == 1 && j == 0) || (i == 0 && j == 1) || (i == 1 && j == 1)) {
         EXPECT_FLOAT_EQ(1.3, histogram.get_dist(i, j));
-        EXPECT_FLOAT_EQ(0.0, histogram.get_age(i, j));
-      } else if ((i == 2 && j == 2) || (i == 2 && j == 3) ||
-                 (i == 3 && j == 2) || (i == 3 && j == 3)) {
-        EXPECT_FLOAT_EQ(3, histogram.get_age(i, j));
+      } else if ((i == 2 && j == 2) || (i == 2 && j == 3) || (i == 3 && j == 2) || (i == 3 && j == 3)) {
         EXPECT_FLOAT_EQ(0.0, histogram.get_dist(i, j));
       } else {
         EXPECT_FLOAT_EQ(0.0, histogram.get_dist(i, j));
-        EXPECT_FLOAT_EQ(0.0, histogram.get_age(i, j));
       }
     }
   }
@@ -711,4 +624,16 @@ TEST(Histogram, HistogramUpDownpsampleInorrectUsage) {
   // resolution
   EXPECT_THROW(low_res_histogram.downsample(), std::logic_error);
   EXPECT_THROW(high_res_histogram.upsample(), std::logic_error);
+}
+
+TEST(Histogram, HistogramisEmpty) {
+  // GIVEN: a histogram
+  Histogram histogram = Histogram(ALPHA_RES);
+  // Set a cell
+  histogram.set_dist(0, 0, 1.3);
+  EXPECT_FALSE(histogram.isEmpty());
+
+  // Set the cell dist to 0.f
+  histogram.set_dist(0, 0, 0.f);
+  EXPECT_TRUE(histogram.isEmpty());
 }

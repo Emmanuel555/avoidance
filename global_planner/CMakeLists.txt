@@ -1,7 +1,8 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 2.8.12)
 project(global_planner)
 
-add_definitions(-std=c++11)
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
@@ -18,9 +19,19 @@ find_package(catkin REQUIRED COMPONENTS
   mavros_msgs
   mavros
   mavros_extras
+  avoidance
 )
 find_package(PCL 1.7 REQUIRED)
 find_package(octomap REQUIRED)
+
+if(DISABLE_SIMULATION)
+  message(STATUS "Building avoidance without Gazebo Simulation")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DDISABLE_SIMULATION")
+endif()
+
+################################################
+## Gazebo Simulation
+################################################
 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
@@ -59,7 +70,6 @@ find_package(octomap REQUIRED)
 add_message_files(
   FILES
   PathWithRiskMsg.msg
-  ThreePointMsg.msg
 )
 
 ## Generate services in the 'srv' folder
@@ -99,8 +109,7 @@ generate_messages(
 
 ## Generate dynamic reconfigure parameters in the 'cfg' folder
 generate_dynamic_reconfigure_options(
-  cfg/path_handler_node.cfg
-  cfg/global_planner_node.cfg
+  cfg/GlobalPlannerNode.cfg
 )
 
 ###################################
@@ -114,7 +123,6 @@ generate_dynamic_reconfigure_options(
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
   INCLUDE_DIRS include
-  LIBRARIES global_planner cell node
   CATKIN_DEPENDS roscpp rospy std_msgs geometry_msgs sensor_msgs message_runtime tf
 #  DEPENDS system_lib
 )
@@ -137,18 +145,16 @@ include_directories(
   ${catkin_INCLUDE_DIRS}
   ${PCL_INCLUDE_DIRS}
   ${OCTOMAP_INCLUDE_DIRS}
+  ${YAML_CPP_INCLUDE_DIR}
 )
 link_libraries(${OCTOMAP_LIBRARIES})
 
 ## Declare a C++ library
-add_library(cell
-  src/library/cell.cpp
-)
-add_library(node
-  src/library/node.cpp
-)
 add_library(global_planner
+  src/library/node.cpp
+  src/library/cell.cpp
   src/library/global_planner.cpp
+  src/nodes/global_planner_node.cpp
 )
 
 ## Add cmake target dependencies of the library
@@ -157,18 +163,12 @@ add_library(global_planner
 add_dependencies(global_planner ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 ## Declare a C++ executable
-add_executable(global_planner_node src/nodes/global_planner_node.cpp)
-add_executable(path_handler_node src/nodes/path_handler_node.cpp)
-
-## Add cmake target dependencies of the executable
-## same as for the library above
-add_dependencies(path_handler_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_executable(global_planner_node src/nodes/global_planner_node_main.cpp)
 
 ## Specify libraries to link a library or executable target against
 target_link_libraries(global_planner_node
-  global_planner cell node ${catkin_LIBRARIES} ${PCL_LIBRARIES})
-target_link_libraries(path_handler_node
-  ${catkin_LIBRARIES})
+  global_planner ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${YAML_CPP_LIBRARIES}
+)
 
 #############
 ## Install ##
@@ -218,6 +218,30 @@ if(CATKIN_ENABLE_TESTING)
 	                                             ${catkin_LIBRARIES}
 	                                             ${YAML_CPP_LIBRARIES})
 	endif()
+
+
+    if (${CMAKE_BUILD_TYPE} STREQUAL "Coverage")
+        SET(CMAKE_CXX_FLAGS "-g -O0 -fprofile-arcs -ftest-coverage --coverage")
+        SET(CMAKE_C_FLAGS "-g -O0 -fprofile-arcs -ftest-coverage --coverage")
+        SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
+
+        add_custom_target(${PROJECT_NAME}-test_coverage
+            COMMAND lcov --zerocounters --directory ${PROJECT_BINARY_DIR}
+            COMMAND lcov --capture  --initial --no-external --directory ${PROJECT_BINARY_DIR} --base-directory ${${PROJECT_NAME}_SOURCE_DIR} --output-file base_coverage.info --rc lcov_branch_coverage=1
+            COMMAND ${PROJECT_NAME}-test
+            COMMAND lcov --capture  --no-external --directory ${PROJECT_BINARY_DIR} --base-directory ${${PROJECT_NAME}_SOURCE_DIR} --output-file test_coverage.info --rc lcov_branch_coverage=1
+            COMMAND lcov -a base_coverage.info -a test_coverage.info -o coverage.info --rc lcov_branch_coverage=1
+            COMMAND lcov --rc lcov_branch_coverage=1 --summary coverage.info
+            WORKING_DIRECTORY .
+            DEPENDS ${PROJECT_NAME}-test
+        )
+        add_custom_target(${PROJECT_NAME}-test_coverage_html
+            COMMAND genhtml coverage.info --output-directory out --branch-coverage
+            COMMAND x-www-browser out/index.html
+            WORKING_DIRECTORY .
+            DEPENDS ${PROJECT_NAME}-test_coverage
+        )
+    endif()
 endif()
 ## Add folders to be run by python nosetests
 # catkin_add_nosetests(test)

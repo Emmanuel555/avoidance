@@ -1,73 +1,105 @@
-#include "global_planner_node.h"
+#include "global_planner/global_planner_node.h"
 
 namespace global_planner {
 
-GlobalPlannerNode::GlobalPlannerNode() {
-  nh_ = ros::NodeHandle("~");
-
+GlobalPlannerNode::GlobalPlannerNode(const ros::NodeHandle& nh, const ros::NodeHandle& nh_private)
+    : nh_(nh),
+      nh_private_(nh_private),
+      avoidance_node_(nh, nh_private),
+      cmdloop_dt_(0.1),
+      plannerloop_dt_(1.0),
+      mapupdate_dt_(0.2),
+      start_yaw_(0.0) {
   // Set up Dynamic Reconfigure Server
-  dynamic_reconfigure::Server<
-      global_planner::GlobalPlannerNodeConfig>::CallbackType f;
+  dynamic_reconfigure::Server<global_planner::GlobalPlannerNodeConfig>::CallbackType f;
   f = boost::bind(&GlobalPlannerNode::dynamicReconfigureCallback, this, _1, _2);
   server_.setCallback(f);
 
+#ifndef DISABLE_SIMULATION
+  world_visualizer_.reset(new avoidance::WorldVisualizer(nh_, ros::this_node::getName()));
+#endif
+
+  avoidance_node_.init();
   // Read Ros parameters
   readParams();
 
   // Subscribers
-  octomap_full_sub_ = nh_.subscribe(
-      "/octomap_full", 1, &GlobalPlannerNode::octomapFullCallback, this);
-  ground_truth_sub_ = nh_.subscribe("/mavros/local_position/pose", 1,
-                                    &GlobalPlannerNode::positionCallback, this);
-  velocity_sub_ = nh_.subscribe("/mavros/local_position/velocity", 1,
-                                &GlobalPlannerNode::velocityCallback, this);
-  clicked_point_sub_ = nh_.subscribe(
-      "/clicked_point", 1, &GlobalPlannerNode::clickedPointCallback, this);
-  three_point_sub_ = nh_.subscribe(
-      "/three_points", 1, &GlobalPlannerNode::threePointCallback, this);
-  move_base_simple_sub_ =
-      nh_.subscribe("/move_base_simple/goal", 1,
-                    &GlobalPlannerNode::moveBaseSimpleCallback, this);
-  laser_sensor_sub_ =
-      nh_.subscribe("/scan", 1, &GlobalPlannerNode::laserSensorCallback, this);
-  depth_camera_sub_ = nh_.subscribe(
-      "/camera/depth/points", 1, &GlobalPlannerNode::depthCameraCallback, this);
-  fcu_input_sub_ =
-      nh_.subscribe("/mavros/trajectory/desired", 1,
-                    &GlobalPlannerNode::fcuInputGoalCallback, this);
+  octomap_full_sub_ = nh_.subscribe("/octomap_full", 1, &GlobalPlannerNode::octomapFullCallback, this);
+  ground_truth_sub_ = nh_.subscribe("/mavros/local_position/pose", 1, &GlobalPlannerNode::positionCallback, this);
+  velocity_sub_ = nh_.subscribe("/mavros/local_position/velocity", 1, &GlobalPlannerNode::velocityCallback, this);
+  clicked_point_sub_ = nh_.subscribe("/clicked_point", 1, &GlobalPlannerNode::clickedPointCallback, this);
+  move_base_simple_sub_ = nh_.subscribe("/move_base_simple/goal", 1, &GlobalPlannerNode::moveBaseSimpleCallback, this);
+  fcu_input_sub_ = nh_.subscribe("/mavros/trajectory/desired", 1, &GlobalPlannerNode::fcuInputGoalCallback, this);
 
   // Publishers
-  three_points_pub_ = nh_.advertise<nav_msgs::Path>("/three_points", 10);
-  three_points_smooth_pub_ =
-      nh_.advertise<nav_msgs::Path>("/three_points_smooth", 10);
-  three_points_revised_pub_ =
-      nh_.advertise<nav_msgs::Path>("/three_points_revised", 10);
-  global_path_pub_ = nh_.advertise<nav_msgs::Path>("/global_path", 10);
-  global_temp_path_pub_ =
-      nh_.advertise<nav_msgs::Path>("/global_temp_path", 10);
+  global_temp_path_pub_ = nh_.advertise<nav_msgs::Path>("/global_temp_path", 10);
   actual_path_pub_ = nh_.advertise<nav_msgs::Path>("/actual_path", 10);
   smooth_path_pub_ = nh_.advertise<nav_msgs::Path>("/smooth_path", 10);
-  global_goal_pub_ =
-      nh_.advertise<geometry_msgs::PointStamped>("/global_goal", 10);
-  global_temp_goal_pub_ =
-      nh_.advertise<geometry_msgs::PointStamped>("/global_temp_goal", 10);
-  explored_cells_pub_ =
-      nh_.advertise<visualization_msgs::MarkerArray>("/explored_cells", 10);
+  global_goal_pub_ = nh_.advertise<geometry_msgs::PointStamped>("/global_goal", 10);
+  global_temp_goal_pub_ = nh_.advertise<geometry_msgs::PointStamped>("/global_temp_goal", 10);
+  explored_cells_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/explored_cells", 10);
+  mavros_waypoint_publisher_ = nh_.advertise<geometry_msgs::PoseStamped>("/mavros/setpoint_position/local", 10);
+  mavros_obstacle_free_path_pub_ = nh_.advertise<mavros_msgs::Trajectory>("/mavros/trajectory/generated", 10);
+  current_waypoint_publisher_ = nh_.advertise<geometry_msgs::PoseStamped>("/current_setpoint", 10);
+  pointcloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/cloud_in", 10);
 
-  actual_path_.header.frame_id = "/world";
-  listener_.waitForTransform("/fcu", "/world", ros::Time(0),
-                             ros::Duration(3.0));
+  actual_path_.header.frame_id = frame_id_;
+
+  ros::TimerOptions cmdlooptimer_options(ros::Duration(cmdloop_dt_),
+                                         boost::bind(&GlobalPlannerNode::cmdLoopCallback, this, _1), &cmdloop_queue_);
+  cmdloop_timer_ = nh_.createTimer(cmdlooptimer_options);
+
+  cmdloop_spinner_.reset(new ros::AsyncSpinner(1, &cmdloop_queue_));
+  cmdloop_spinner_->start();
+
+  ros::TimerOptions plannerlooptimer_options(ros::Duration(plannerloop_dt_),
+                                             boost::bind(&GlobalPlannerNode::plannerLoopCallback, this, _1),
+                                             &plannerloop_queue_);
+  plannerloop_timer_ = nh_.createTimer(plannerlooptimer_options);
+
+  plannerloop_spinner_.reset(new ros::AsyncSpinner(1, &plannerloop_queue_));
+  plannerloop_spinner_->start();
+
+  current_goal_.header.frame_id = frame_id_;
+  current_goal_.pose.position = start_pos_;
+  current_goal_.pose.orientation = tf::createQuaternionMsgFromYaw(start_yaw_);
+  last_goal_ = current_goal_;
+
+  speed_ = global_planner_.default_speed_;
+  start_time_ = ros::Time::now();
 }
 
 GlobalPlannerNode::~GlobalPlannerNode() {}
 
 // Read Ros parameters
 void GlobalPlannerNode::readParams() {
-  double x, y, z;
-  nh_.param<double>("start_pos_x", x, 0.5);
-  nh_.param<double>("start_pos_y", y, 0.5);
-  nh_.param<double>("start_pos_z", z, 3.5);
-  global_planner_.goal_pos_ = GoalCell(x, y, z);
+  std::vector<std::string> camera_topics;
+
+  nh_.param<double>("start_pos_x", start_pos_.x, 0.5);
+  nh_.param<double>("start_pos_y", start_pos_.y, 0.5);
+  nh_.param<double>("start_pos_z", start_pos_.z, 3.5);
+  nh_.param<std::string>("frame_id", frame_id_, "/local_origin");
+  nh_.getParam("pointcloud_topics", camera_topics);
+  if (!nh_.hasParam("camera_frame_id")) {
+    nh_.setParam("camera_frame_id", "/camera_link");
+  } else {
+    nh_.getParam("camera_frame_id", camera_frame_id_);
+  }
+
+  initializeCameraSubscribers(camera_topics);
+  global_planner_.goal_pos_ = GoalCell(start_pos_.x, start_pos_.y, start_pos_.z);
+  double robot_radius;
+  nh_.param<double>("robot_radius", robot_radius, 0.5);
+  global_planner_.setFrame(frame_id_);
+  global_planner_.setRobotRadius(robot_radius);
+}
+
+void GlobalPlannerNode::initializeCameraSubscribers(std::vector<std::string>& camera_topics) {
+  cameras_.resize(camera_topics.size());
+
+  for (size_t i = 0; i < camera_topics.size(); i++) {
+    cameras_[i].pointcloud_sub_ = nh_.subscribe(camera_topics[i], 1, &GlobalPlannerNode::depthCameraCallback, this);
+  }
 }
 
 // Sets a new goal, plans a path to it and publishes some info
@@ -75,7 +107,6 @@ void GlobalPlannerNode::setNewGoal(const GoalCell& goal) {
   ROS_INFO("========== Set goal : %s ==========", goal.asString().c_str());
   global_planner_.setGoal(goal);
   publishGoal(goal);
-  planPath();
 }
 
 // Sets the next waypoint to be the current goal
@@ -89,7 +120,6 @@ void GlobalPlannerNode::popNextGoal() {
     // Goal is blocked but there is no other goal in waypoints_, just stop
     ROS_INFO("  STOP  ");
     global_planner_.stop();
-    publishPath();
   }
 }
 
@@ -97,15 +127,10 @@ void GlobalPlannerNode::popNextGoal() {
 void GlobalPlannerNode::planPath() {
   std::clock_t start_time = std::clock();
   if (global_planner_.octree_) {
-    ROS_INFO("OctoMap memory usage: %2.3f MB",
-             global_planner_.octree_->memoryUsage() / 1000000.0);
+    ROS_INFO("OctoMap memory usage: %2.3f MB", global_planner_.octree_->memoryUsage() / 1000000.0);
   }
 
   bool found_path = global_planner_.getGlobalPath();
-
-  // Publish even though no path is found
-  publishExploredCells();
-  publishPath();
 
   if (!found_path) {
     // TODO: popNextGoal(), instead of checking if goal_is_blocked in
@@ -115,8 +140,7 @@ void GlobalPlannerNode::planPath() {
     // The path is not good enough, set an intermediate goal on the path
     setIntermediateGoal();
   }
-  printf("Total time: %2.2f ms \n",
-         (std::clock() - start_time) / (double)(CLOCKS_PER_SEC / 1000));
+  printf("Total time: %2.2f ms \n", (std::clock() - start_time) / (double)(CLOCKS_PER_SEC / 1000));
 }
 
 // Sets a temporary goal on the path to the current goal
@@ -130,8 +154,7 @@ void GlobalPlannerNode::setIntermediateGoal() {
   }
 }
 
-void GlobalPlannerNode::dynamicReconfigureCallback(
-    global_planner::GlobalPlannerNodeConfig& config, uint32_t level) {
+void GlobalPlannerNode::dynamicReconfigureCallback(global_planner::GlobalPlannerNodeConfig& config, uint32_t level) {
   // global_planner_
   global_planner_.min_altitude_ = config.min_altitude_;
   global_planner_.max_altitude_ = config.max_altitude_;
@@ -146,11 +169,15 @@ void GlobalPlannerNode::dynamicReconfigureCallback(
   global_planner_.search_time_ = config.search_time_;
   global_planner_.min_overestimate_factor_ = config.min_overestimate_factor_;
   global_planner_.max_overestimate_factor_ = config.max_overestimate_factor_;
+  global_planner_.risk_threshold_risk_based_speedup_ = config.risk_threshold_risk_based_speedup_;
+  global_planner_.default_speed_ = config.default_speed_;
+  global_planner_.max_speed_ = config.max_speed_;
   global_planner_.max_iterations_ = config.max_iterations_;
   global_planner_.goal_must_be_free_ = config.goal_must_be_free_;
   global_planner_.use_current_yaw_ = config.use_current_yaw_;
   global_planner_.use_risk_heuristics_ = config.use_risk_heuristics_;
   global_planner_.use_speedup_heuristics_ = config.use_speedup_heuristics_;
+  global_planner_.use_risk_based_speedup_ = config.use_risk_based_speedup_;
 
   // global_planner_node
   clicked_goal_alt_ = config.clicked_goal_alt_;
@@ -170,54 +197,48 @@ void GlobalPlannerNode::dynamicReconfigureCallback(
   }
 }
 
-void GlobalPlannerNode::velocityCallback(
-    const geometry_msgs::TwistStamped& msg) {
-  auto transformed_msg =
-      transformTwistMsg(listener_, "world", "local_origin", msg);  // 90 deg fix
-  global_planner_.curr_vel_ = transformed_msg.twist.linear;
+void GlobalPlannerNode::velocityCallback(const geometry_msgs::TwistStamped& msg) {
+  global_planner_.curr_vel_ = msg.twist.linear;
 }
 
 // Sets the current position and checks if the current goal has been reached
-void GlobalPlannerNode::positionCallback(
-    const geometry_msgs::PoseStamped& msg) {
+void GlobalPlannerNode::positionCallback(const geometry_msgs::PoseStamped& msg) {
   // Update position
-  auto rot_msg = msg;
-  listener_.transformPose("world", ros::Time(0), msg, "local_origin",
-                          rot_msg);  // 90 deg fix
-  global_planner_.setPose(rot_msg);
+  last_pos_ = msg;
+  global_planner_.setPose(last_pos_);
 
   // Check if a new goal is needed
-  bool is_in_goal =
-      global_planner_.goal_pos_.withinPositionRadius(global_planner_.curr_pos_);
-  if (is_in_goal || global_planner_.goal_is_blocked_) {
-    popNextGoal();
-  }
-
-  // If the current cell is blocked, try finding a path again
-  if (global_planner_.current_cell_blocked_) {
-    planPath();
-  }
-
-  // Print and publish info
-  if (is_in_goal && !waypoints_.empty()) {
-    ROS_INFO("Reached current goal %s, %d goals left\n\n",
-             global_planner_.goal_pos_.asString().c_str(),
-             (int)waypoints_.size());
-    ROS_INFO("Actual travel distance: %2.2f \t Actual energy usage: %2.2f",
-             pathLength(actual_path_),
-             pathEnergy(actual_path_, global_planner_.up_cost_));
-  }
   if (num_pos_msg_++ % 10 == 0) {
     // Keep track of and publish the actual travel trajectory
     // ROS_INFO("Travelled path extended");
-    rot_msg.header.frame_id = "/world";
-    actual_path_.poses.push_back(rot_msg);
+    last_pos_.header.frame_id = frame_id_;
+    actual_path_.poses.push_back(last_pos_);
     actual_path_pub_.publish(actual_path_);
+  }
+
+  position_received_ = true;
+
+  // Check if we are close enough to current goal to get the next part of the
+  // path
+  if (path_.size() > 0 && isCloseToGoal()) {
+    // TODO: get yawdiff(yaw1, yaw2)
+    double yaw1 = tf::getYaw(current_goal_.pose.orientation);
+    double yaw2 = tf::getYaw(last_pos_.pose.orientation);
+    double yaw_diff = std::abs(yaw2 - yaw1);
+    // Transform yaw_diff to [0, 2*pi]
+    yaw_diff -= std::floor(yaw_diff / (2 * M_PI)) * (2 * M_PI);
+    double max_yaw_diff = M_PI / 1.0;
+    if (yaw_diff < max_yaw_diff || yaw_diff > 2 * M_PI - max_yaw_diff) {
+      // If we are facing the right direction, then pop the first point of the
+      // path
+      last_goal_ = current_goal_;
+      current_goal_ = path_[0];
+      path_.erase(path_.begin());
+    }
   }
 }
 
-void GlobalPlannerNode::clickedPointCallback(
-    const geometry_msgs::PointStamped& msg) {
+void GlobalPlannerNode::clickedPointCallback(const geometry_msgs::PointStamped& msg) {
   printPointInfo(msg.point.x, msg.point.y, msg.point.z);
 
   geometry_msgs::PoseStamped pose;
@@ -225,111 +246,47 @@ void GlobalPlannerNode::clickedPointCallback(
   pose.pose.position = msg.point;
   pose.pose.position.z = global_planner_.curr_pos_.z;
   last_clicked_points.push_back(pose);
-  if (last_clicked_points.size() >= 3) {
-    nav_msgs::Path three_points;
-    three_points.header = msg.header;
-    three_points.poses = last_clicked_points;
-    last_clicked_points.clear();
-    three_points_pub_.publish(three_points);
-    three_points_smooth_pub_.publish(threePointBezier(three_points));
-    double risk = global_planner_.getRiskOfCurve(three_points.poses);
-    ROS_INFO("Risk of curve: %2.2f \n", risk);
-  }
 }
 
-void GlobalPlannerNode::threePointCallback(const nav_msgs::Path& msg) {
-  double risk = global_planner_.getRiskOfCurve(msg.poses);
-  ROS_INFO("Risk of curve: %2.2f \n", risk);
-
-  nav_msgs::Path new_msg;
-  new_msg.header = msg.header;
-  if (risk > 1.0) {
-    // Current path is too risky, propose an alternative
-    std::vector<Cell> new_path;
-    Cell parent(msg.poses[0].pose.position);
-    Cell s = Cell(interpolate(msg.poses[0].pose.position,
-                              msg.poses[1].pose.position, 0.25));
-    Cell t = GoalCell(Cell(msg.poses[2].pose.position), 5.0);
-    auto start_node = global_planner_.getStartNode(s, parent, "SpeedNode");
-    auto search_res = findSmoothPath(&global_planner_, new_path, start_node, t);
-    new_msg = global_planner_.getPathMsg(new_path);
-  }
-  three_points_revised_pub_.publish(smoothPath(new_msg));
+void GlobalPlannerNode::moveBaseSimpleCallback(const geometry_msgs::PoseStamped& msg) {
+  setNewGoal(GoalCell(msg.pose.position.x, msg.pose.position.y, clicked_goal_alt_, clicked_goal_radius_));
 }
 
-void GlobalPlannerNode::moveBaseSimpleCallback(
-    const geometry_msgs::PoseStamped& msg) {
-  setNewGoal(GoalCell(msg.pose.position.x, msg.pose.position.y,
-                      clicked_goal_alt_, clicked_goal_radius_));
-}
-
-void GlobalPlannerNode::fcuInputGoalCallback(
-    const mavros_msgs::Trajectory& msg) {
-  const GoalCell new_goal =
-      GoalCell(msg.point_2.position.x, msg.point_2.position.y,
-               msg.point_2.position.z, 1.0);
-  if (msg.point_valid[1] == true &&
-      ((std::fabs(global_planner_.goal_pos_.xPos() - new_goal.xPos()) >
-        0.001) ||
-       (std::fabs(global_planner_.goal_pos_.yPos() - new_goal.yPos()) >
-        0.001))) {
+void GlobalPlannerNode::fcuInputGoalCallback(const mavros_msgs::Trajectory& msg) {
+  const GoalCell new_goal = GoalCell(msg.point_2.position.x, msg.point_2.position.y, msg.point_2.position.z, 1.0);
+  if (msg.point_valid[1] == true && ((std::fabs(global_planner_.goal_pos_.xPos() - new_goal.xPos()) > 0.001) ||
+                                     (std::fabs(global_planner_.goal_pos_.yPos() - new_goal.yPos()) > 0.001))) {
     setNewGoal(new_goal);
-  }
-}
-
-// If the laser senses something too close to current position, it is considered
-// a crash
-void GlobalPlannerNode::laserSensorCallback(const sensor_msgs::LaserScan& msg) {
-  if (global_planner_.going_back_) {
-    return;  // Don't deal with the same crash again
-  }
-
-  double ignore_dist =
-      msg.range_min;        // Too close, probably part of the vehicle
-  double crash_dist = 0.5;  // Otherwise, a measurement below this is a crash
-  for (double range : msg.ranges) {
-    if (ignore_dist < range && range < crash_dist) {
-      if (global_planner_.path_back_.size() > 3) {
-        // Don't complain about crashing on take-off
-        ROS_INFO("CRASH!!! Distance to obstacle: %2.2f\n\n\n", range);
-        global_planner_.goBack();
-        publishPath();
-      }
-    }
   }
 }
 
 // Check if the current path is blocked
 void GlobalPlannerNode::octomapFullCallback(const octomap_msgs::Octomap& msg) {
-  if (num_octomap_msg_++ % 10 > 0) {
-    return;  // We get too many of those messages. Only process 1/10 of them
-  }
+  std::lock_guard<std::mutex> lock(mutex_);
 
-  bool current_path_is_ok = global_planner_.updateFullOctomap(msg);
-  if (!current_path_is_ok) {
-    ROS_INFO("  Path is bad, planning a new path \n");
-    if (global_planner_.goal_pos_.is_temporary_) {
-      popNextGoal();  // Throw away temporary goal
-    } else {
-      planPath();  // Plan a whole new path
-    }
+  ros::Time current = ros::Time::now();
+  // Update map at a fixed rate. This is useful on setting replanning rates for the planner.
+  if ((current - last_wp_time_).toSec() < mapupdate_dt_) {
+    return;
   }
+  last_wp_time_ = ros::Time::now();
+
+  octomap::AbstractOcTree* tree = octomap_msgs::msgToMap(msg);
+
+  global_planner_.updateFullOctomap(tree);
 }
 
 // Go through obstacle points and store them
-void GlobalPlannerNode::depthCameraCallback(
-    const sensor_msgs::PointCloud2& msg) {
+void GlobalPlannerNode::depthCameraCallback(const sensor_msgs::PointCloud2& msg) {
   try {
     // Transform msg from camera frame to world frame
     ros::Time now = ros::Time::now();
-    listener_.waitForTransform("/world", "/camera_link", now,
-                               ros::Duration(5.0));
+    listener_.waitForTransform(frame_id_, camera_frame_id_, now, ros::Duration(5.0));
     tf::StampedTransform transform;
-    listener_.lookupTransform("/world", "/camera_link", now, transform);
+    listener_.lookupTransform(frame_id_, camera_frame_id_, now, transform);
     sensor_msgs::PointCloud2 transformed_msg;
-    pcl_ros::transformPointCloud("/world", transform, msg, transformed_msg);
-    pcl::PointCloud<pcl::PointXYZ>
-        cloud;  // Easier to loop through pcl::PointCloud
+    pcl_ros::transformPointCloud(frame_id_, transform, msg, transformed_msg);
+    pcl::PointCloud<pcl::PointXYZ> cloud;  // Easier to loop through pcl::PointCloud
     pcl::fromROSMsg(transformed_msg, cloud);
 
     // Store the obstacle points
@@ -340,16 +297,65 @@ void GlobalPlannerNode::depthCameraCallback(
         global_planner_.occupied_.insert(occupied_cell);
       }
     }
+    pointcloud_pub_.publish(msg);
   } catch (tf::TransformException const& ex) {
     ROS_DEBUG("%s", ex.what());
-    ROS_WARN("Transformation not available (/world to /camera_link");
+    ROS_WARN("Transformation not available (%s to %s)", frame_id_.c_str(), camera_frame_id_.c_str());
   }
+}
+
+void GlobalPlannerNode::setCurrentPath(const std::vector<geometry_msgs::PoseStamped>& poses) {
+  path_.clear();
+
+  if (poses.size() < 2) {
+    ROS_INFO("  Received empty path\n");
+    return;
+  }
+  last_goal_ = poses[0];
+  current_goal_ = poses[1];
+
+  for (int i = 2; i < poses.size(); ++i) {
+    path_.push_back(poses[i]);
+  }
+}
+
+void GlobalPlannerNode::cmdLoopCallback(const ros::TimerEvent& event) {
+  hover_ = false;
+
+  // Check if all information was received
+  ros::Time now = ros::Time::now();
+
+  ros::Duration since_last_cloud = now - last_wp_time_;
+  ros::Duration since_start = now - start_time_;
+
+  avoidance_node_.checkFailsafe(since_last_cloud, since_start, hover_);
+  publishSetpoint();
+}
+
+void GlobalPlannerNode::plannerLoopCallback(const ros::TimerEvent& event) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  bool is_in_goal = global_planner_.goal_pos_.withinPositionRadius(global_planner_.curr_pos_);
+  if (is_in_goal || global_planner_.goal_is_blocked_) {
+    popNextGoal();
+  }
+
+  planPath();
+
+  // Print and publish info
+  if (is_in_goal && !waypoints_.empty()) {
+    ROS_INFO("Reached current goal %s, %d goals left\n\n", global_planner_.goal_pos_.asString().c_str(),
+             (int)waypoints_.size());
+    ROS_INFO("Actual travel distance: %2.2f \t Actual energy usage: %2.2f", pathLength(actual_path_),
+             pathEnergy(actual_path_, global_planner_.up_cost_));
+  }
+
+  publishPath();
 }
 
 // Publish the position of goal
 void GlobalPlannerNode::publishGoal(const GoalCell& goal) {
   geometry_msgs::PointStamped pointMsg;
-  pointMsg.header.frame_id = "/world";
+  pointMsg.header.frame_id = frame_id_;
   pointMsg.point = goal.toPoint();
 
   // Always publish as temporary to remove any obsolete temporary path
@@ -365,92 +371,65 @@ void GlobalPlannerNode::publishPath() {
   PathWithRiskMsg risk_msg = global_planner_.getPathWithRiskMsg();
   // Always publish as temporary to remove any obsolete temporary path
   global_temp_path_pub_.publish(path_msg);
-  if (!global_planner_.goal_pos_.is_temporary_) {
-    global_path_pub_.publish(path_msg);
-  }
+  setCurrentPath(path_msg.poses);
   smooth_path_pub_.publish(smoothPath(path_msg));
 
-  auto simple_path = simplifyPath(&global_planner_, global_planner_.curr_path_,
-                                  simplify_iterations_, simplify_margin_);
+  auto simple_path = simplifyPath(&global_planner_, global_planner_.curr_path_, simplify_iterations_, simplify_margin_);
   auto simple_path_msg = global_planner_.getPathMsg(simple_path);
   global_temp_path_pub_.publish(simple_path_msg);
+  setCurrentPath(simple_path_msg.poses);
   smooth_path_pub_.publish(smoothPath(simple_path_msg));
-}
-
-// Publish the cells that were explored in the last search
-// Can be tweeked to publish other info (path_cells)
-void GlobalPlannerNode::publishExploredCells() {
-  visualization_msgs::MarkerArray msg;
-
-  // The first marker deletes the ones from previous search
-  int id = 0;
-  visualization_msgs::Marker marker;
-  marker.id = id;
-  marker.action = 3;  // same as visualization_msgs::Marker::DELETEALL
-  msg.markers.push_back(marker);
-
-  id = 1;
-  for (const auto& cell : global_planner_.visitor_.seen_) {
-    // for (auto const& x : global_planner_.bubble_risk_cache_) {
-    // Cell cell = x.first;
-
-    // double hue = (cell.zPos()-1.0) / 7.0;                // height from 1 to
-    // 8 meters double hue = 0.5;                                    // single
-    // color (green) double hue = global_planner_.getHeuristic(Node(cell, cell),
-    // global_planner_.goal_pos_) / global_planner_.curr_path_info_.cost; The
-    // color is the square root of the risk, shows difference in low risk
-    double hue = std::sqrt(global_planner_.getRisk(cell));
-    auto color = spectralColor(hue);
-    if (!global_planner_.octree_->search(cell.xPos(), cell.yPos(),
-                                         cell.zPos())) {
-      // Unknown space
-      color.r = color.g = color.b = 0.2;  // Dark gray
-    }
-    visualization_msgs::Marker marker =
-        createMarker(id++, cell.toPoint(), color);
-
-    // risk from 0% to 100%, sqrt is used to increase difference in low risk
-    msg.markers.push_back(marker);
-  }
-  explored_cells_pub_.publish(msg);
 }
 
 // Prints information about the point, mostly the risk of the containing cell
 void GlobalPlannerNode::printPointInfo(double x, double y, double z) {
   // Update explored cells
-  publishExploredCells();
   printPointStats(&global_planner_, x, y, z);
 }
 
-}  // namespace global_planner
-
-int main(int argc, char** argv) {
-  ros::init(argc, argv, "global_planner_node");
-  global_planner::GlobalPlannerNode global_planner_node;
-
-  // Read waypoints from file, if any
-  ros::V_string args;
-  ros::removeROSArgs(argc, argv, args);
-
-  if (args.size() > 1) {
-    ROS_INFO("    ARGS: %s", args.at(1).c_str());
-    std::ifstream wp_file(args.at(1).c_str());
-    if (wp_file.is_open()) {
-      double x, y, z;
-      while (wp_file >> x >> y >> z) {
-        global_planner_node.waypoints_.push_back(global_planner::Cell(x, y, z));
-      }
-      wp_file.close();
-      ROS_INFO("  Read %d waypoints.",
-               static_cast<int>(global_planner_node.waypoints_.size()));
-    } else {
-      ROS_ERROR_STREAM("Unable to open goal file: " << args.at(1));
-      return -1;
+void GlobalPlannerNode::publishSetpoint() {
+  // Vector pointing from current position to the current goal
+  tf::Vector3 vec = toTfVector3(subtractPoints(current_goal_.pose.position, last_pos_.pose.position));
+  if (global_planner_.use_speedup_heuristics_) {
+    Cell cur_cell =
+        global_planner::Cell(last_pos_.pose.position.x, last_pos_.pose.position.y, last_pos_.pose.position.z);
+    double cur_risk = std::sqrt(global_planner_.getRisk(cur_cell));
+    if (cur_risk >= global_planner_.risk_threshold_risk_based_speedup_) {  // If current risk is too high(more than
+                                                                           // risk_threshold_risk_based_speedup_), set
+                                                                           // speed as low to stable flight.
+      speed_ = global_planner_.default_speed_;
+    } else {  // If current risk is low, speed up for fast flight.
+      speed_ = global_planner_.default_speed_ +
+               (global_planner_.max_speed_ - global_planner_.default_speed_) * (1 - cur_risk);
     }
-  } else {
-    ROS_INFO("  No goal file given.");
+  } else {  // If risk based speed up is not activated, use default_speed_.
+    speed_ = global_planner_.default_speed_;
   }
 
-  ros::spin();
-  return 0;
+  // If we are less than 1.0 away, then we should stop at the goal
+  double new_len = vec.length() < 1.0 ? vec.length() : speed_;
+  vec.normalize();
+  vec *= new_len;
+
+  auto setpoint = current_goal_;  // The intermediate position sent to Mavros
+  setpoint.pose.position.x = last_pos_.pose.position.x + vec.getX();
+  setpoint.pose.position.y = last_pos_.pose.position.y + vec.getY();
+  setpoint.pose.position.z = last_pos_.pose.position.z + vec.getZ();
+
+  // Publish setpoint for vizualization
+  current_waypoint_publisher_.publish(setpoint);
+
+  // Publish setpoint to Mavros
+  mavros_waypoint_publisher_.publish(setpoint);
+  mavros_msgs::Trajectory obst_free_path = {};
+  geometry_msgs::Twist velocity_setpoint{};
+  velocity_setpoint.linear.x = NAN;
+  velocity_setpoint.linear.y = NAN;
+  velocity_setpoint.linear.z = NAN;
+  avoidance::transformToTrajectory(obst_free_path, setpoint, velocity_setpoint);
+  mavros_obstacle_free_path_pub_.publish(obst_free_path);
 }
+
+bool GlobalPlannerNode::isCloseToGoal() { return distance(current_goal_, last_pos_) < speed_; }
+
+}  // namespace global_planner

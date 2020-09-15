@@ -1,7 +1,8 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 2.8.12)
 project(local_planner)
 
-add_definitions(-std=c++11)
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 
 ## Find catkin macros and libraries
@@ -17,25 +18,20 @@ find_package(catkin REQUIRED COMPONENTS
   mavros_extras
   mavros_msgs
   mavlink
+  avoidance
 )
 find_package(PCL 1.7 REQUIRED)
 
-
-
+if(DISABLE_SIMULATION)
+  message(STATUS "Building avoidance without Gazebo Simulation")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DDISABLE_SIMULATION")
+endif()
 
 ################################################
 ## Gazebo Simulation
 ################################################
-# Disable yaml-cpp when no simulation is required
-if(DISABLE_SIMULATION)
-  message(STATUS "Building local planner without Gazebo Simulation")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DDISABLE_SIMULATION")
-else()
-  message(STATUS "Building local planner with Gazebo Simulation")
-  find_package(yaml-cpp REQUIRED)
-endif(DISABLE_SIMULATION)
 ## System dependencies are found with CMake's conventions
-# find_package(Boost REQUIRED COMPONENTS system)
+find_package(Boost REQUIRED COMPONENTS system)
 
 
 ## Uncomment this if the package has a setup.py. This macro ensures
@@ -97,7 +93,7 @@ endif(DISABLE_SIMULATION)
 
 ## Generate dynamic reconfigure parameters in the 'cfg' folder
 generate_dynamic_reconfigure_options(
-  cfg/local_planner_node.cfg
+  cfg/LocalPlannerNode.cfg
 )
 
 ###################################
@@ -111,7 +107,8 @@ generate_dynamic_reconfigure_options(
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
   INCLUDE_DIRS include
-  CATKIN_DEPENDS roscpp rospy std_msgs mavros_msgs geometry_msgs mav_msgs sensor_msgs message_runtime tf
+  LIBRARIES local_planner
+  CATKIN_DEPENDS roscpp rospy std_msgs mavros_msgs geometry_msgs sensor_msgs message_runtime tf avoidance
 #  DEPENDS system_lib
 )
 
@@ -141,25 +138,21 @@ include_directories(
 # )
 set(LOCAL_PLANNER_CPP_FILES   "src/nodes/local_planner.cpp"
                               "src/nodes/waypoint_generator.cpp"
-                              "src/nodes/histogram.cpp"
                               "src/nodes/tree_node.cpp"
-                              "src/nodes/box.cpp"
                               "src/nodes/star_planner.cpp"
                               "src/nodes/planner_functions.cpp"
-                              "src/nodes/common.cpp"
-                              "src/nodes/local_planner_node.cpp"
+                              "src/nodes/local_planner_visualization.cpp"
+                              "src/utils/trajectory_simulator.cpp"
 )
-if(NOT DISABLE_SIMULATION)
-  set(LOCAL_PLANNER_CPP_FILES "${LOCAL_PLANNER_CPP_FILES}"
-                              "src/nodes/rviz_world_loader.cpp")
-endif()
-add_library(local_planner     "${LOCAL_PLANNER_CPP_FILES}")
 
+add_library(local_planner     "${LOCAL_PLANNER_CPP_FILES}")
+add_library(local_planner_nodelet src/nodes/local_planner_nodelet.cpp)
 
 ## Add cmake target dependencies of the library
 ## as an example, code may need to be generated before libraries
 ## either from message generation or dynamic reconfigure
 add_dependencies(local_planner ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(local_planner_nodelet local_planner ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 ## Declare a C++ executable
 # add_executable(avoidance_node src/avoidance_node.cpp)
@@ -174,10 +167,26 @@ add_executable(local_planner_node src/nodes/local_planner_node_main.cpp)
 #   ${catkin_LIBRARIES}
 #   ${PCL_LIBRARIES}
 # )
-target_link_libraries(local_planner_node
+target_link_libraries(
+  local_planner
+  PUBLIC
+  ${catkin_LIBRARIES}
+  ${YAML_CPP_LIBRARIES})
+
+target_link_libraries(
+  local_planner_nodelet
+  PUBLIC
   local_planner
   ${catkin_LIBRARIES}
   ${YAML_CPP_LIBRARIES})
+
+target_link_libraries(
+  local_planner_node
+  PUBLIC
+  local_planner_nodelet
+  ${catkin_LIBRARIES}
+  ${YAML_CPP_LIBRARIES}
+  ${Boost_LIBRARIES})
 
 #############
 ## Install ##
@@ -219,29 +228,54 @@ target_link_libraries(local_planner_node
 #############
 
 if(CATKIN_ENABLE_TESTING)
-	# Add gtest based cpp test target and link libraries
-	catkin_add_gtest(${PROJECT_NAME}-test test/main.cpp
-	                                      test/test_example.cpp
-	                                      test/test_common.cpp
-	                                      test/test_local_planner.cpp
-	                                      test/test_planner_functions.cpp
-                                             test/test_star_planner.cpp
-                                             test/test_waypoint_generator.cpp)
+    # Add gtest based cpp test target and link libraries
+    catkin_add_gtest(${PROJECT_NAME}-test test/main.cpp
+                                          test/test_example.cpp
+                                          test/test_local_planner.cpp
+                                          test/test_planner_functions.cpp
+                                          test/test_star_planner.cpp
+                                          test/test_trajectory_simulator.cpp
+                                          test/test_waypoint_generator.cpp)
 
-  catkin_add_gtest(${PROJECT_NAME}-test-roscore test/main.cpp
-                                        test/test_local_planner_node.cpp)
-	if(TARGET ${PROJECT_NAME}-test)
-	  target_link_libraries(${PROJECT_NAME}-test ${PROJECT_NAME}
-	                                             ${catkin_LIBRARIES}
-	                                             ${YAML_CPP_LIBRARIES})
-	endif()
+    catkin_add_gtest(${PROJECT_NAME}-test-roscore test/main.cpp
+                                        test/test_local_planner_nodelet.cpp)
+    if(TARGET ${PROJECT_NAME}-test)
+        target_link_libraries(${PROJECT_NAME}-test ${PROJECT_NAME}
+                                                 ${catkin_LIBRARIES}
+                                                 ${YAML_CPP_LIBRARIES})
+    endif()
 
-  if(TARGET ${PROJECT_NAME}-test-roscore)
-	  target_link_libraries(${PROJECT_NAME}-test-roscore ${PROJECT_NAME}
-	                                             ${catkin_LIBRARIES}
-	                                             ${YAML_CPP_LIBRARIES})
-	endif()
+    if(TARGET ${PROJECT_NAME}-test-roscore)
+        target_link_libraries(${PROJECT_NAME}-test-roscore local_planner_nodelet
+                                                 ${catkin_LIBRARIES}
+                                                 ${YAML_CPP_LIBRARIES})
+    endif()
 
-	## Add folders to be run by python nosetests
-	# catkin_add_nosetests(test)
+
+    if (${CMAKE_BUILD_TYPE} STREQUAL "Coverage")
+        SET(CMAKE_CXX_FLAGS "-g -O0 -fprofile-arcs -ftest-coverage --coverage")
+        SET(CMAKE_C_FLAGS "-g -O0 -fprofile-arcs -ftest-coverage --coverage")
+        SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
+
+        add_custom_target(${PROJECT_NAME}-test_coverage
+            COMMAND lcov --zerocounters --directory ${PROJECT_BINARY_DIR}
+            COMMAND lcov --capture  --initial --no-external --directory ${PROJECT_BINARY_DIR} --base-directory ${${PROJECT_NAME}_SOURCE_DIR} --output-file base_coverage.info --rc lcov_branch_coverage=1
+            COMMAND ${PROJECT_NAME}-test
+            COMMAND ${PROJECT_NAME}-test-roscore
+            COMMAND lcov --capture  --no-external --directory ${PROJECT_BINARY_DIR} --base-directory ${${PROJECT_NAME}_SOURCE_DIR} --output-file test_coverage.info --rc lcov_branch_coverage=1
+            COMMAND lcov -a base_coverage.info -a test_coverage.info -o coverage.info --rc lcov_branch_coverage=1
+            COMMAND lcov --rc lcov_branch_coverage=1 --summary coverage.info
+            WORKING_DIRECTORY .
+            DEPENDS ${PROJECT_NAME}-test ${PROJECT_NAME}-test-roscore
+        )
+        add_custom_target(${PROJECT_NAME}-test_coverage_html
+            COMMAND genhtml coverage.info --output-directory out --branch-coverage
+            COMMAND x-www-browser out/index.html
+            WORKING_DIRECTORY .
+            DEPENDS ${PROJECT_NAME}-test_coverage
+        )
+    endif()
+
+    ## Add folders to be run by python nosetests
+    # catkin_add_nosetests(test)
 endif()

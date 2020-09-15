@@ -1,9 +1,8 @@
 #ifndef STAR_PLANNER_H
 #define STAR_PLANNER_H
 
-#include "box.h"
+#include "avoidance/histogram.h"
 #include "cost_parameters.h"
-#include "histogram.h"
 
 #include <Eigen/Dense>
 
@@ -21,45 +20,34 @@ namespace avoidance {
 class TreeNode;
 
 class StarPlanner {
-  float h_FOV_ = 59.0f;
-  float v_FOV_ = 46.0f;
   int children_per_node_ = 1;
   int n_expanded_nodes_ = 5;
   float tree_node_distance_ = 1.0f;
-  float tree_discount_factor_ = 0.8f;
   float max_path_length_ = 4.f;
-  float curr_yaw_;
+  float smoothing_margin_degrees_ = 30.f;
+  float tree_heuristic_weight_ = 10.0f;
+  float max_sensor_range_ = 15.f;
+  float min_sensor_range_ = 0.2f;
 
-  std::vector<int> reprojected_points_age_;
-  std::vector<int> path_node_origins_;
-
-  pcl::PointCloud<pcl::PointXYZ> pointcloud_;
-  pcl::PointCloud<pcl::PointXYZ> reprojected_points_;
+  pcl::PointCloud<pcl::PointXYZI> cloud_;
 
   Eigen::Vector3f goal_ = Eigen::Vector3f(NAN, NAN, NAN);
-  Eigen::Vector3f projected_last_wp_ = Eigen::Vector3f::Zero();
   Eigen::Vector3f position_ = Eigen::Vector3f(NAN, NAN, NAN);
+  Eigen::Vector3f velocity_ = Eigen::Vector3f(NAN, NAN, NAN);
+  Eigen::Vector3f closest_pt_ = Eigen::Vector3f(NAN, NAN, NAN);
   costParameters cost_params_;
 
  protected:
-  /**
-  * @brief     computes the cost of a node
-  * @param[in] node_number, sequential number of entry in the tree
-  * @returns
-  **/
-  float treeCostFunction(int node_number);
-
   /**
   * @brief     computes the heuristic for a node
   * @param[in] node_number, sequential number of entry in the tree
   * @returns
   **/
-  float treeHeuristicFunction(int node_number);
+  float treeHeuristicFunction(int node_number) const;
 
  public:
   std::vector<Eigen::Vector3f> path_node_positions_;
   std::vector<int> closed_set_;
-  int tree_age_;
   std::vector<TreeNode> tree_;
 
   StarPlanner();
@@ -72,47 +60,28 @@ class StarPlanner {
   void setParams(costParameters cost_params);
 
   /**
-  * @brief     setter method for last sent waypoint
-  * @param[in] projected_last_wp, last waypoint projected out to goal distance
+  * @brief     setter method for star_planner pointcloud
+  * @param[in] cloud, processed data already cropped and combined with history
   **/
-  void setLastDirection(const Eigen::Vector3f& projected_last_wp);
-
-  /**
-  * @brief     setter method for Fielf of View
-  * @param[in] h_FOV, horizontal Field of View [deg]
-  * @param[in] v_FOV, vertical Field of View [deg]
-  **/
-  void setFOV(float h_FOV, float v_FOV);
-
-  /**
-  * @brief     setter method for reprojected pointcloud
-  * @param[in] reprojected_points, pointcloud from previous frames reprojected
-  *            around the vehicle current position
-  * @param[in] reprojected_points_age, array containing the age of each
-  *            reprojected point
-  **/
-  void setReprojectedPoints(
-      const pcl::PointCloud<pcl::PointXYZ>& reprojected_points,
-      const std::vector<int>& reprojected_points_age);
+  void setPointcloud(const pcl::PointCloud<pcl::PointXYZI>& cloud);
 
   /**
   * @brief     setter method for vehicle position
-  * @param[in] pos, vehicle current position and orientation
-  * @param[in] curr_yaw, vehicle current yaw
+  * @param[in] vehicle current position
   **/
-  void setPose(const Eigen::Vector3f& pos, float curr_yaw);
+  void setPose(const Eigen::Vector3f& pos, const Eigen::Vector3f& vel);
+
+  /**
+  * @brief     setter method for vehicle position projection on the line between the current and previous goal
+  * @param[in] closest_pt, projection point
+  **/
+  void setClosestPointOnLine(const Eigen::Vector3f& closest_pt);
 
   /**
   * @brief     setter method for current goal
   * @param[in] goal, current goal position
   **/
   void setGoal(const Eigen::Vector3f& pose);
-
-  /**
-  * @brief     setter method for pointcloud
-  * @param[in] cropped_cloud, current point cloud cropped around the vehicle
-  **/
-  void setCloud(const pcl::PointCloud<pcl::PointXYZ>& cropped_cloud);
 
   /**
   * @brief     build tree of candidates directions towards the goal
@@ -122,8 +91,7 @@ class StarPlanner {
   /**
   * @brief     setter method for server paramters
   **/
-  void dynamicReconfigureSetStarParams(
-      const avoidance::LocalPlannerNodeConfig& config, uint32_t level);
+  void dynamicReconfigureSetStarParams(const avoidance::LocalPlannerNodeConfig& config, uint32_t level);
 };
 }
 #endif  // STAR_PLANNER_H

@@ -16,13 +16,10 @@
 
 #include <octomap/OcTree.h>
 #include <octomap/octomap.h>
-#include <octomap_msgs/Octomap.h>
-#include <octomap_msgs/conversions.h>
 
 #include <global_planner/GlobalPlannerNodeConfig.h>
 #include <global_planner/PathWithRiskMsg.h>
 #include "global_planner/analysis.h"
-#include "global_planner/bezier.h"
 #include "global_planner/cell.h"
 #include "global_planner/common.h"
 #include "global_planner/common_ros.h"
@@ -39,30 +36,25 @@ class GlobalPlanner {
   // 0.05, 0.05, 0.05, 0.05, 0.05}; std::vector<double> alt_prior_ { 0.1, 0.1,
   // 0.1, 0.1, 0.1, 0.1, 0.1,
   //                                   0.1, 0.1, 0.1, 0.1, 0.1, 0.1};
-  std::vector<double> alt_prior_{
-      1.0,    0.2,   0.1333, 0.1,   0.0833, 0.05,  0.033, 0.025, 0.0166,
-      0.0125, 0.001, 0.001,  0.001, 0.001,  0.001, 0.001, 0.001, 0.001,
-      0.001,  0.001, 0.001,  0.001, 0.001,  0.001, 0.001};
+  std::vector<double> alt_prior_{1.0,    0.2,   0.1333, 0.1,   0.0833, 0.05,  0.033, 0.025, 0.0166,
+                                 0.0125, 0.001, 0.001,  0.001, 0.001,  0.001, 0.001, 0.001, 0.001,
+                                 0.001,  0.001, 0.001,  0.001, 0.001,  0.001, 0.001};
 
   // Needed to quickly estimate the risk of vertical movement
   std::vector<double> accumulated_alt_prior_;  // accumulated_alt_prior_[i] =
                                                // sum(alt_prior_[0:i])
 
-  std::unordered_map<Cell, double> risk_cache_;  // Cache of getRisk(Cell)
-  std::unordered_map<Cell, double>
-      bubble_risk_cache_;  // Cache the risk of the safest path from Cell to t
-  std::unordered_map<Node, double> heuristic_cache_;  // Cache of
-                                                      // getHeuristic(Node) (and
-                                                      // later reverse search)
-  double bubble_cost_ = 0.0;  // Minimum risk for the safest path from a cell
-                              // outside of the bubble to t
-  double bubble_radius_ =
-      0.0;  // The maximum distance from a cell within the bubble to t
+  std::unordered_map<Cell, double> risk_cache_;         // Cache of getRisk(Cell)
+  std::unordered_map<Cell, double> bubble_risk_cache_;  // Cache the risk of the safest path from Cell to t
+  std::unordered_map<Node, double> heuristic_cache_;    // Cache of
+                                                        // getHeuristic(Node) (and
+                                                        // later reverse search)
+  double bubble_cost_ = 0.0;                            // Minimum risk for the safest path from a cell
+                                                        // outside of the bubble to t
+  double bubble_radius_ = 0.0;                          // The maximum distance from a cell within the bubble to t
 
-  std::unordered_set<Cell>
-      occupied_;  // Cells which have at some point contained an obstacle point
-  std::unordered_set<Cell>
-      path_cells_;  // Cells that are on current path, and may not be blocked
+  std::unordered_set<Cell> occupied_;    // Cells which have at some point contained an obstacle point
+  std::unordered_set<Cell> path_cells_;  // Cells that are on current path, and may not be blocked
 
   // TODO: rename and remove not needed
   std::vector<Cell> path_back_;
@@ -71,12 +63,6 @@ class GlobalPlanner {
   geometry_msgs::Vector3 curr_vel_;
   GoalCell goal_pos_ = GoalCell(0.5, 0.5, 3.5);
   bool going_back_ = true;  // we start by just finding the start position
-
-  double overestimate_factor_ = max_overestimate_factor_;
-  std::vector<Cell> curr_path_;
-  PathInfo curr_path_info_;
-  SearchVisitor<std::unordered_set<Cell>, std::unordered_map<Cell, double> >
-      visitor_;
 
   // Dynamic reconfigure parameters
   int min_altitude_ = 1;
@@ -93,16 +79,24 @@ class GlobalPlanner {
   double search_time_ = 0.5;  // The time it takes to find a path in worst case
   double min_overestimate_factor_ = 1.03;
   double max_overestimate_factor_ = 2.0;
+  double risk_threshold_risk_based_speedup_ = 0.5;
+  double default_speed_ = 1.0;  // Default speed of flight.
+  double max_speed_ = 3.0;      // Maximum speed of flight.
   int max_iterations_ = 2000;
   bool goal_is_blocked_ = false;
   bool current_cell_blocked_ = false;
-  bool goal_must_be_free_ =
-      true;  // If false, the planner may try to find a path close to the goal
-  bool use_current_yaw_ =
-      true;  // The current orientation is factored into the smoothness
+  bool goal_must_be_free_ = true;  // If false, the planner may try to find a path close to the goal
+  bool use_current_yaw_ = true;    // The current orientation is factored into the smoothness
   bool use_risk_heuristics_ = true;
   bool use_speedup_heuristics_ = true;
+  bool use_risk_based_speedup_ = true;
   std::string default_node_type_ = "SpeedNode";
+  std::string frame_id_ = "world";
+
+  double overestimate_factor_ = max_overestimate_factor_;
+  std::vector<Cell> curr_path_;
+  PathInfo curr_path_info_;
+  SearchVisitor<std::unordered_set<Cell>, std::unordered_map<Cell, double> > visitor_;
 
   GlobalPlanner();
   ~GlobalPlanner();
@@ -112,11 +106,11 @@ class GlobalPlanner {
   void setPose(const geometry_msgs::PoseStamped& new_pose);
   void setGoal(const GoalCell& goal);
   void setPath(const std::vector<Cell>& path);
+  void setFrame(std::string frame_id);
 
-  bool updateFullOctomap(const octomap_msgs::Octomap& msg);
+  void updateFullOctomap(octomap::AbstractOcTree* tree);
 
-  void getOpenNeighbors(const Cell& cell,
-                        std::vector<CellDistancePair>& neighbors, bool is_3D);
+  void getOpenNeighbors(const Cell& cell, std::vector<CellDistancePair>& neighbors, bool is_3D);
   bool isNearWall(const Cell& cell);
 
   double getEdgeDist(const Cell& u, const Cell& v);
@@ -142,13 +136,17 @@ class GlobalPlanner {
   PathWithRiskMsg getPathWithRiskMsg();
   PathInfo getPathInfo(const std::vector<Cell>& path);
 
-  NodePtr getStartNode(const Cell& start, const Cell& parent,
-                       const std::string& type);
+  NodePtr getStartNode(const Cell& start, const Cell& parent, const std::string& type);
   bool findPath(std::vector<Cell>& path);
 
   bool getGlobalPath();
   void goBack();
   void stop();
+  void setRobotRadius(double radius);
+
+ private:
+  double robot_radius_;
+  double octree_resolution_;
 };
 
 }  // namespace global_planner
