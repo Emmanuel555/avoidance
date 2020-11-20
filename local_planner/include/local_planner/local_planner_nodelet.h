@@ -187,6 +187,8 @@ class LocalPlannerNodelet : public nodelet::Nodelet {
   ros::Publisher mavros_obstacle_free_path_pub_;
   ros::Publisher mavros_obstacle_distance_pub_;
   ros::Publisher mavros_system_status_pub_;
+  ros::Publisher goal_z_;
+  
 
   // Subscribers
   ros::Subscriber pose_sub_;
@@ -254,6 +256,8 @@ class LocalPlannerNodelet : public nodelet::Nodelet {
 
   float desired_yaw_setpoint_{NAN};
   float desired_yaw_speed_setpoint_{NAN};
+
+  double z_goal; // newly added
 
   boost::recursive_mutex config_mutex_;
 

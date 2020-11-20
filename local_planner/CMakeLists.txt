@@ -18,6 +18,7 @@ find_package(catkin REQUIRED COMPONENTS
   mavros_extras
   mavros_msgs
   mavlink
+  roslib
   avoidance
 )
 find_package(PCL 1.7 REQUIRED)

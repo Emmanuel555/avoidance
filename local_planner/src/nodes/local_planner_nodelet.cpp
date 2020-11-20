@@ -90,6 +90,7 @@ void LocalPlannerNodelet::InitializeNodelet() {
   mavros_pos_setpoint_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("/mavros/setpoint_position/local", 10);
   mavros_obstacle_free_path_pub_ = nh_.advertise<mavros_msgs::Trajectory>("/mavros/trajectory/generated", 10);
   mavros_obstacle_distance_pub_ = nh_.advertise<sensor_msgs::LaserScan>("/mavros/obstacle/send", 10);
+  goal_z_ = nh_.advertise<std_msgs::Float64>("/goal_z", 10); // added this as an extra as I was still relying on goal_z param for height
 
   // initialize visualization topics
   visualizer_.initializePublishers(nh_);
@@ -121,7 +122,7 @@ void LocalPlannerNodelet::readParams() {
   Eigen::Vector3d goal_d = goal_position_.cast<double>();
   nh_private_.param<double>(nodelet::Nodelet::getName() + "/goal_x_param", goal_d.x(), 0.0);
   nh_private_.param<double>(nodelet::Nodelet::getName() + "/goal_y_param", goal_d.y(), 0.0);
-  nh_private_.param<double>(nodelet::Nodelet::getName() + "/lgoal_z_param", goal_d.z(), 0.0);
+  nh_private_.param<double>(nodelet::Nodelet::getName() + "/goal_z_param", goal_d.z(), 0.0); // edited goal z param
   nh_private_.param<bool>(nodelet::Nodelet::getName() + "/accept_goal_input_topic", accept_goal_input_topic_, false);
   goal_position_ = goal_d.cast<float>();
 
@@ -325,7 +326,7 @@ void LocalPlannerNodelet::clickedGoalCallback(const geometry_msgs::PoseStamped& 
   goal_position_ = toEigen(msg.pose.position);
   /* Selecting the goal from Rviz sets x and y. Get the z coordinate set in
    * the launch file */
-  goal_position_.z() = local_planner_->getGoal().z();
+  //goal_position_.z() = local_planner_->getGoal().z(); // removed the need to rely on the goal_z_param in rqt reconfigure
 }
 
 void LocalPlannerNodelet::updateGoalCallback(const visualization_msgs::MarkerArray& msg) {
@@ -437,6 +438,8 @@ void LocalPlannerNodelet::dynamicReconfigureCallback(avoidance::LocalPlannerNode
   local_planner_->dynamicReconfigureSetParams(config, level);
   wp_generator_->setSmoothingSpeed(config.smoothing_speed_xy_, config.smoothing_speed_z_);
   rqt_param_config_ = config;
+  z_goal = config.goal_z_param;// newly added
+  goal_z_.publish(z_goal); // newly added
 }
 
 void LocalPlannerNodelet::publishLaserScan() const {
